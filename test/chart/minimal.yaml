@@ -1,0 +1,4 @@
+# The least an install needs: the address and a token.
+flawrook:
+  url: https://flawrook.acme.io
+  token: flra_chart0test0token

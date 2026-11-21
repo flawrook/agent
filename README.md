@@ -95,6 +95,13 @@ Or in two steps, which keeps the token out of your shell history:
 
 It needs systemd 235 or newer: Debian 10, Ubuntu 18.04, RHEL, Rocky Linux and AlmaLinux 8, or later. An older systemd ignores `DynamicUser`, and the agent would run as root. So on an older systemd, or one whose version it can't read, `install.sh` stops before it installs anything. The deb or rpm installed by itself puts its files in place, but neither enables nor starts the service, and says why. If an older systemd starts it all the same (a unit enabled by hand), the agent sees it runs as root under systemd, logs why and stops with exit status 78, which the unit doesn't restart. A root shell that inherits systemd's `INVOCATION_ID` (`systemd-run --shell`, or `su` without `-` inside a systemd user unit) is refused the same way: run the agent there with `env -u INVOCATION_ID flawrook-agent`. Alpine and other systems without systemd have no such floor.
 
+## Install on Kubernetes
+
+For a cluster, the agent runs as one pod from the Helm chart `oci://ghcr.io/flawrook/charts/flawrook-agent`, with
+the signed image `ghcr.io/flawrook/agent`. Both are signed with the same key as the releases. What it reads, how
+to check the signatures, install, and uninstall leaving nothing behind: see
+[deploy/helm/flawrook-agent/README.md](deploy/helm/flawrook-agent/README.md).
+
 ## The unit's hardening, by systemd version
 
 `install.sh` and the packages need systemd 235 or newer. Each line of the unit needs the systemd version shown, from

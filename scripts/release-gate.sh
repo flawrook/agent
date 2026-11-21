@@ -18,8 +18,9 @@
 #   scripts/release-gate.sh 0.1.0
 # Docker only. Heavy: it builds both architectures and runs the install test (systemd in a privileged
 # container), the integration test (four distribution containers), the network proof and the mutation
-# check. Run it when the machine is otherwise quiet. GATE_HEALTH_URL, if set, is checked before each heavy
-# step, and the gate stops when it fails or takes more than 1 s. It is also watched every 30 s for the whole
+# check, and checks the Helm chart (test/chart-test.sh) and the container image (test/image-test.sh). Run it
+# when the machine is otherwise quiet. GATE_HEALTH_URL, if set, is checked before each heavy step, and the gate
+# stops when it fails or takes more than 1 s. It is also watched every 30 s for the whole
 # run: a failure or more than 1 s stops the gate's own containers (never another's), goes into health.log,
 # and marks the running step STOPPED; the watch goes on. GATE_STEPS="vet test …" runs only those steps.
 # release.sh puts packaging/cosign.pub into install.sh, or COSIGN_PUB's key; it signs nothing (release-sign.yml does).
@@ -46,7 +47,7 @@ gate_containers() {
   {
     docker ps -q --filter label=org.flawrook.agent=build
     docker ps --format '{{.ID}} {{.Names}} {{.Networks}}' |
-      awk '$2 ~ /^flawrook-agent-(install|it|netproof)-[0-9]/ || $3 ~ /flawrook-agent-(install|it|netproof)-[0-9]/ {print $1}'
+      awk '$2 ~ /^(buildx_buildkit_)?flawrook-agent-(install|it|netproof|image)-[0-9]/ || $3 ~ /flawrook-agent-(install|it|netproof)-[0-9]/ {print $1}'
   } | sort -u
 }
 breaches() { if [ -f "$OUT/health.log" ]; then wc -l <"$OUT/health.log" | tr -d ' '; else echo 0; fi; }
@@ -79,6 +80,8 @@ note() {
     integration) grep -E '^[a-z0-9-]+: reports=' "$log" | sed -E 's/ maxRssKiB.*//' | tr '\n' ';' ;;
     network-proof) grep -E '^(dry-run|direct|proxy):' "$log" | cut -d';' -f1 | tr '\n' ';' ;;
     mutants) tail -1 "$log" ;;
+    chart) tail -1 "$log" ;;
+    image) tail -1 "$log" ;;
   esac
 }
 
@@ -143,10 +146,12 @@ step gofmt         0 gofmt_clean
 step shellcheck    0 docker run --rm --memory 256m -v "$PWD":/mnt:ro --entrypoint sh "$SHELLCHECK_IMAGE" -c 'shellcheck -s sh /mnt/packaging/*.sh /mnt/scripts/*.sh /mnt/test/*.sh'
 step headers       0 scripts/headers.sh
 step licences      0 scripts/licences.sh --check
+step chart         0 test/chart-test.sh "$OUT/chart"
 step release       1 scripts/release.sh "$VERSION"
 step unit-caps     0 built_unit_is_packaged
 step artifacts     0 artifacts
 step signature     0 signature
+step image         1 test/image-test.sh "$OUT/image" "$VERSION"
 step install-test  1 test/install-test.sh "$OUT/install-test"
 step integration   1 test/integration.sh "$OUT/integration"
 step network-proof 1 test/network-proof.sh "$OUT/network-proof"

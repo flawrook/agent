@@ -1,31 +1,39 @@
-# Signs a release: when a prerelease is published, checksums.txt gets its cosign signature, checksums.txt.sig,
-# and only then is the release made the latest, which is what install.sh's releases/latest address reads. So no
-# unsigned release is ever the one installed by default. The private key and its password are the repository
-# secrets COSIGN_PRIVATE_KEY and COSIGN_PASSWORD; the signature is checked against packaging/cosign.pub, the key
-# every install.sh carries, before it is uploaded. It goes into no transparency log: install.sh and the README's
-# command check it against the key alone.
+# Signs and publishes a release, when a prerelease is published:
+# 1. sign: checksums.txt gets its cosign signature, checksums.txt.sig.
+# 2. image: the release's own two binaries, checked against that signature and checksums.txt, become the container
+#    image ghcr.io/flawrook/agent:<version> for linux/amd64 and linux/arm64, signed by its digest.
+# 3. chart: the Helm chart, with that image digest in its values, goes to oci://ghcr.io/flawrook/charts and is
+#    signed by its digest.
+# 4. latest: only then is the release made the latest, which is what install.sh's releases/latest address reads.
+# A failed job leaves the release a prerelease, so no unsigned release is ever the one installed by default.
+# The private key and its password are the repository secrets COSIGN_PRIVATE_KEY and COSIGN_PASSWORD; every
+# signature is checked against packaging/cosign.pub, the key every install.sh carries, before the next step. None
+# goes into a transparency log: install.sh, the README and the chart's README check them against the key alone.
 name: Sign the release
 on:
   release:
     types: [published]
 permissions: {}
+env:
+  IMAGE: ghcr.io/flawrook/agent
+  CHARTS: oci://ghcr.io/flawrook/charts
+  TAG: ${{ github.event.release.tag_name }}
 jobs:
   sign:
     if: github.event.release.prerelease
     runs-on: ubuntu-24.04
     permissions:
-      contents: write # the release's new asset, and the edit that makes it the latest
+      contents: write # the release's new asset
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
         with:
-          cosign-release: v2.6.0 # its detached signature verifies with cosign 2 and 3 alike
-      - name: Sign checksums.txt, check the signature, attach it, make the release the latest
+          cosign-release: v2.6.0 # its signatures verify with cosign 2 and 3 alike
+      - name: Sign checksums.txt, check the signature, attach it
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.event.release.tag_name }}
           COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
           COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
         run: |
@@ -34,4 +42,108 @@ jobs:
           cosign sign-blob --yes --key env://COSIGN_PRIVATE_KEY --tlog-upload=false --output-signature release/checksums.txt.sig release/checksums.txt
           cosign verify-blob --key packaging/cosign.pub --signature release/checksums.txt.sig --insecure-ignore-tlog=true release/checksums.txt
           gh release upload "$TAG" release/checksums.txt.sig --repo "$GITHUB_REPOSITORY"
-          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --prerelease=false --latest
+
+  image:
+    needs: sign
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write # the image and its signature on ghcr.io
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+        with:
+          cosign-release: v2.6.0
+      - name: Take the release's binaries, checked against the signed checksums.txt
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir release \
+            --pattern checksums.txt --pattern checksums.txt.sig --pattern flawrook-agent-linux-amd64 --pattern flawrook-agent-linux-arm64
+          cosign verify-blob --key packaging/cosign.pub --signature release/checksums.txt.sig --insecure-ignore-tlog=true release/checksums.txt
+          cd release
+          grep -E '^[0-9a-f]{64}  flawrook-agent-linux-(amd64|arm64)$' checksums.txt >binaries.sha256
+          [ "$(wc -l <binaries.sha256)" -eq 2 ]
+          sha256sum --strict -c binaries.sha256
+      - name: Build the image for amd64 and arm64, push it, sign it by its digest
+        id: push
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+        run: |
+          version=${TAG#v}
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          # BuildKit pinned (v0.34.2); the Dockerfile has no RUN step, so no emulation is needed for arm64.
+          docker buildx create --name flawrook --driver docker-container --use \
+            --driver-opt image=moby/buildkit:v0.34.2@sha256:c5f8862f52499773af85bc07695b2379ef08e8002352b0df2c4864c91d78dabe
+          docker buildx build --platform linux/amd64,linux/arm64 --file packaging/Dockerfile --build-arg VERSION="$version" \
+            --provenance=false --sbom=false --tag "$IMAGE:$version" --metadata-file meta.json --push release
+          digest=$(jq -r '."containerimage.digest"' meta.json)
+          echo "$digest" | grep -Eqx 'sha256:[0-9a-f]{64}'
+          docker buildx imagetools inspect "$IMAGE@$digest" --raw |
+            jq -r '[.manifests[].platform | .os + "/" + .architecture] | sort | join(" ")' | grep -qx 'linux/amd64 linux/arm64'
+          cosign sign --yes --key env://COSIGN_PRIVATE_KEY --tlog-upload=false "$IMAGE@$digest"
+          cosign verify --key packaging/cosign.pub --insecure-ignore-tlog=true "$IMAGE@$digest" >/dev/null
+          echo "digest=$digest" >>"$GITHUB_OUTPUT"
+          echo "Image: \`$IMAGE:$version\`, \`$digest\`" >>"$GITHUB_STEP_SUMMARY"
+
+  chart:
+    needs: image
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write # the chart and its signature on ghcr.io
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+        with:
+          cosign-release: v2.6.0
+      - name: Install Helm 3.22.1, checked against its published sha256
+        run: |
+          curl -fsSL -o helm.tar.gz https://get.helm.sh/helm-v3.22.1-linux-amd64.tar.gz
+          echo '896cf63684a42a723d61c980369d6e588330927deb13676ca0d85006dd6da0ea  helm.tar.gz' | sha256sum --strict -c -
+          tar -xzf helm.tar.gz linux-amd64/helm
+          sudo install -m 0755 linux-amd64/helm /usr/local/bin/helm
+      - name: Put the image digest in the chart, package it, push it, sign it by its digest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DIGEST: ${{ needs.image.outputs.digest }}
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+        run: |
+          version=${TAG#v}
+          chart=deploy/helm/flawrook-agent
+          echo "$DIGEST" | grep -Eqx 'sha256:[0-9a-f]{64}'
+          sed -i "s|^  digest: \"\"\$|  digest: \"$DIGEST\"|" "$chart/values.yaml"
+          grep -qx "  digest: \"$DIGEST\"" "$chart/values.yaml"
+          helm lint "$chart" --set flawrook.token=flra_lint
+          helm package "$chart" --version "$version" --app-version "$version" --destination dist
+          helm template flawrook-agent "dist/flawrook-agent-$version.tgz" --set flawrook.token=flra_lint |
+            grep -qx "          image: \"$IMAGE:$version@$DIGEST\""
+          echo "$GH_TOKEN" | helm registry login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin # cosign reads Docker's credentials
+          helm push "dist/flawrook-agent-$version.tgz" "$CHARTS" 2>&1 | tee push.log
+          digest=$(sed -n 's/^Digest: //p' push.log)
+          echo "$digest" | grep -Eqx 'sha256:[0-9a-f]{64}'
+          ref=${CHARTS#oci://}/flawrook-agent@$digest
+          cosign sign --yes --key env://COSIGN_PRIVATE_KEY --tlog-upload=false "$ref"
+          cosign verify --key packaging/cosign.pub --insecure-ignore-tlog=true "$ref" >/dev/null
+          echo "Chart: \`$CHARTS/flawrook-agent\` $version, \`$digest\`" >>"$GITHUB_STEP_SUMMARY"
+
+  latest:
+    needs: [sign, image, chart]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write # the edit that makes the release the latest
+    steps:
+      - name: Make the release the latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --prerelease=false --latest

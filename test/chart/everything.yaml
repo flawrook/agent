@@ -1,0 +1,52 @@
+# Every optional value set.
+flawrook:
+  url: https://flawrook.acme.io/eu
+  existingSecret: flawrook-token
+clusterName: prod-eu-1
+interval: 30m
+namespaces:
+  include: [shop, data]
+  exclude: [kube-system]
+sbom:
+  maxImageBytes: 536870912
+  concurrency: 2
+image:
+  repository: registry.acme.io/mirror/flawrook-agent
+  digest: sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+  pullPolicy: Always
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+scratch:
+  sizeLimit: 4Gi
+proxy:
+  httpsProxy: http://proxy.acme.io:3128
+  noProxy: registry.acme.io,10.0.0.0/8
+caBundle:
+  configMap: acme-ca
+  key: acme-root.pem
+registryCredentials:
+  existingSecret: acme-registry
+serviceAccount:
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/flawrook-agent
+nodeSelector:
+  kubernetes.io/os: linux
+tolerations:
+  - key: dedicated
+    operator: Equal
+    value: tools
+    effect: NoSchedule
+affinity:
+  nodeAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 1
+        preference:
+          matchExpressions:
+            - key: node-role.acme.io/tools
+              operator: Exists
+priorityClassName: acme-low

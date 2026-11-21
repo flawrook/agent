@@ -1,0 +1,103 @@
+# The FlawRook agent in cluster mode. values.schema.json checks every key: a misspelt one stops the install.
+
+flawrook:
+  # Your FlawRook address, https.
+  url: https://flawrook.dev
+  # The agent token (flra_…) from FlawRook, Integrations, Agents. The chart keeps it in a Secret of its own,
+  # and Helm keeps it in the release's history too. To keep it out of both, leave it empty and name a Secret
+  # you created in the release's namespace instead.
+  token: ""
+  existingSecret: ""
+  existingSecretKey: token
+
+# Each of these goes to the agent as an environment variable (FLAWROOK_CLUSTER_NAME and so on, see
+# templates/deployment.yaml).
+# The cluster's name in FlawRook. Set it: two clusters reported under one name are told apart only by their ids.
+clusterName: ""
+# How often the agent reports, or sends its heartbeat when nothing changed: a Go duration, 10m to 24h.
+interval: 60m
+namespaces:
+  # Only these namespaces' workloads, by exact name; empty: all of them.
+  include: []
+  # Never these.
+  exclude: []
+sbom:
+  # An image larger than this, in compressed bytes, is reported as too large and never pulled. Keep it under
+  # scratch.sizeLimit: the layers are written there while the image's SBOM is built. To be confirmed by measurement.
+  maxImageBytes: 1073741824
+  # Images built at once, 1 to 4. Each one takes its layers' room in scratch.
+  concurrency: 1
+
+image:
+  repository: ghcr.io/flawrook/agent
+  # Empty: the chart's appVersion.
+  tag: ""
+  # Pins the image: the tag stays in the reference for people, the digest decides. Each published chart carries
+  # its own image's digest here.
+  digest: ""
+  pullPolicy: IfNotPresent
+
+# The agent sets its Go memory limit (GOMEMLIMIT) itself, to 75% of limits.memory as its cgroup reports it, so
+# limits.memory must be set. All four are to be set from the first measurements on a real cluster.
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    cpu: 250m
+    memory: 1Gi
+
+scratch:
+  # The emptyDir that holds an image's layers while its SBOM is built (TMPDIR), on the node's disk: a tmpfs would
+  # count against the memory limit. The kubelet evicts the pod if it grows past this, so it bounds the disk use.
+  sizeLimit: 2Gi
+
+proxy:
+  # A proxy for the agent's connections to FlawRook and to the registries.
+  httpsProxy: ""
+  # Hosts reached directly, comma-separated. The cluster's own names (kubernetes.default.svc, .svc,
+  # .cluster.local) are always added.
+  noProxy: ""
+
+caBundle:
+  # A ConfigMap in the release's namespace with a PEM bundle the agent trusts besides the system's: for
+  # FlawRook behind a private CA, or a proxy that inspects TLS.
+  configMap: ""
+  key: ca.crt
+
+registryCredentials:
+  # A kubernetes.io/dockerconfigjson Secret in the release's namespace, for images in private registries, with
+  # plain "auths" entries only. The kubelet mounts it as a read-only file, which the agent reads again for each
+  # pull; it never reads Secrets through the Kubernetes API.
+  existingSecret: ""
+
+serviceAccount:
+  create: true
+  # Empty: the release's full name.
+  name: ""
+  # The ServiceAccount's annotations, such as a cloud's workload identity binding.
+  annotations: {}
+
+rbac:
+  # A ClusterRole that reads pods, nodes and namespaces (get, list, watch), and its binding to the
+  # ServiceAccount. false: bind the same rules yourself.
+  create: true
+
+# Hardened by default; the pod meets the "restricted" Pod Security Standard.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+priorityClassName: ""

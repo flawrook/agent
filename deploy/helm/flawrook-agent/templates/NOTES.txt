@@ -1,0 +1,11 @@
+The FlawRook agent runs as {{ include "flawrook-agent.fullname" . }} in {{ .Release.Namespace }}, reading pods, nodes and namespaces only.
+
+Its log:
+  kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "flawrook-agent.fullname" . }}
+
+The cluster appears in FlawRook under Servers and clusters after its first report.
+{{- if not .Values.flawrook.existingSecret }}
+
+The token is in the Secret {{ include "flawrook-agent.fullname" . }} and in Helm's release history. To keep it out of both,
+create your own Secret and install with flawrook.existingSecret instead of flawrook.token.
+{{- end }}

@@ -17,12 +17,13 @@
 
 Each mutant breaks one behaviour the tests must catch: the file is changed, its package's tests run in
 Docker (scripts/docker-go.sh), and the file is written back and checked by sha256, whatever happens.
-One no-op control must survive. Every line the unit-file test asserts also gets a mutant that removes it.
+A chart mutant runs test/chart-test.sh instead (KUBECONFORM=skip; HELM=helm, if set, passes through).
+Each no-op control must survive. Every line the unit-file test asserts also gets a mutant that removes it.
 
     test/mutants.py              all mutants, from apps/agent
     test/mutants.py "nice 10"    only the named ones
 
-Exit 0 when every behaviour mutant is killed by a test (not by a build error) and the control survives.
+Exit 0 when every behaviour mutant is killed by a test (not by a build error) and the controls survive.
 """
 import hashlib, os, re, subprocess, sys
 
@@ -138,6 +139,40 @@ M = [
  ('internal/config/config.go', 'if c.SBOMConcurrency != 0 && (c.SBOMConcurrency < 1 || c.SBOMConcurrency > 4) {', 'if false {', './internal/config/', 'concurrency unbounded'),
  ('internal/client/client.go', 'return c.postLimit(ctx, ImagesNeededPath, body, false, neededLimit)', 'return c.post(ctx, ImagesNeededPath, body, false)', './internal/client/', 'images/needed answer cut at 64 KiB'),
  ('internal/client/client.go', 'return c.post(ctx, ClusterReportPath, gz, true)', 'return c.post(ctx, ClusterReportPath, gz, false)', './internal/client/', 'cluster report without gzip header'),
+ # The Helm chart: its promises, held by test/chart-test.sh.
+ ("deploy/helm/flawrook-agent/templates/clusterrole.yaml", "    verbs: [\"list\", \"watch\"]", "    verbs: [\"get\", \"list\", \"watch\"]", "chart", "chart: get on pods and nodes"),
+ ("deploy/helm/flawrook-agent/templates/clusterrole.yaml", "    verbs: [\"get\"]", "    verbs: [\"get\", \"list\"]", "chart", "chart: namespaces listed"),
+ ("deploy/helm/flawrook-agent/templates/clusterrole.yaml", "    resourceNames: [\"kube-system\"]\n", "", "chart", "chart: every namespace readable"),
+ ("deploy/helm/flawrook-agent/templates/clusterrole.yaml", "    resources: [\"pods\", \"nodes\"]", "    resources: [\"pods\", \"nodes\", \"secrets\"]", "chart", "chart: the ClusterRole reads Secrets"),
+ ("deploy/helm/flawrook-agent/templates/clusterrole.yaml", "{{- if .Values.rbac.create }}\n# Read-only", "{{- if true }}\n# Read-only", "chart", "chart: a ClusterRole despite rbac.create=false"),
+ ("deploy/helm/flawrook-agent/values.yaml", "  readOnlyRootFilesystem: true", "  readOnlyRootFilesystem: false", "chart", "chart: a writable root"),
+ ("deploy/helm/flawrook-agent/values.yaml", "  allowPrivilegeEscalation: false", "  allowPrivilegeEscalation: true", "chart", "chart: privilege escalation"),
+ ("deploy/helm/flawrook-agent/values.yaml", "      - ALL", "      - NET_RAW", "chart", "chart: not every capability dropped"),
+ ("deploy/helm/flawrook-agent/values.yaml", "    type: RuntimeDefault", "    type: Unconfined", "chart", "chart: no seccomp profile"),
+ ("deploy/helm/flawrook-agent/values.yaml", "  runAsNonRoot: true", "  runAsNonRoot: false", "chart", "chart: root allowed"),
+ ("deploy/helm/flawrook-agent/templates/deployment.yaml", "  replicas: 1", "  replicas: 2", "chart", "chart: two agents"),
+ ("deploy/helm/flawrook-agent/templates/deployment.yaml", "              value: /scratch", "              value: /tmp", "chart", "chart: TMPDIR off the scratch volume"),
+ ("deploy/helm/flawrook-agent/templates/deployment.yaml", "          emptyDir:\n            sizeLimit: {{ .Values.scratch.sizeLimit }}", "          emptyDir: {}", "chart", "chart: scratch uncapped"),
+ ("deploy/helm/flawrook-agent/templates/deployment.yaml", "              mountPath: /etc/flawrook/registry\n              readOnly: true", "              mountPath: /etc/flawrook/registry", "chart", "chart: registry credentials mounted writable"),
+ ("deploy/helm/flawrook-agent/templates/deployment.yaml", "              mountPath: /etc/flawrook/ca\n              readOnly: true", "              mountPath: /etc/flawrook/ca", "chart", "chart: the CA bundle mounted writable"),
+ ("deploy/helm/flawrook-agent/templates/deployment.yaml", "(list \"kubernetes.default.svc\" \".svc\" \".cluster.local\" $.Values.proxy.noProxy)", "(list $.Values.proxy.noProxy)", "chart", "chart: the cluster's names not in NO_PROXY"),
+ ("deploy/helm/flawrook-agent/templates/deployment.yaml", "                  key: {{ include \"flawrook-agent.tokenKey\" . }}", "                  key: token", "chart", "chart: existingSecretKey ignored"),
+ ("deploy/helm/flawrook-agent/templates/deployment.yaml", "# One agent per cluster: a second would report the same cluster again.", "# One agent per cluster.", "chart", "noop control (must SURVIVE): chart"),
+ ("deploy/helm/flawrook-agent/templates/deployment.yaml", "            - name: TMPDIR\n", "            - name: GOMEMLIMIT\n              value: 768MiB\n            - name: TMPDIR\n", "chart", "chart: GOMEMLIMIT set by the chart"),
+ ("deploy/helm/flawrook-agent/templates/deployment.yaml", "              value: cluster\n", "              value: server\n", "chart", "chart: server mode"),
+ ("deploy/helm/flawrook-agent/templates/deployment.yaml", "          terminationMessagePolicy: FallbackToLogsOnError\n", "", "chart", "chart: no log as the termination message"),
+ ("deploy/helm/flawrook-agent/templates/deployment.yaml", "          terminationMessagePolicy: FallbackToLogsOnError\n", "          terminationMessagePolicy: FallbackToLogsOnError\n          livenessProbe:\n            exec:\n              command: [\"/usr/bin/flawrook-agent\", \"--version\"]\n", "chart", "chart: a probe"),
+ ("deploy/helm/flawrook-agent/templates/deployment.yaml", "checksum/token: {{ .Values.flawrook.token | sha256sum }}", "checksum/token: \"0\"", "chart", "chart: a new token doesn't roll the pod"),
+ ("deploy/helm/flawrook-agent/templates/deployment.yaml", "          emptyDir:\n            sizeLimit:", "          emptyDir:\n            medium: Memory\n            sizeLimit:", "chart", "chart: scratch in memory"),
+ ("deploy/helm/flawrook-agent/values.yaml", "  url: https://flawrook.dev\n", "  url: \"\"\n", "chart", "chart: no default address"),
+ ("deploy/helm/flawrook-agent/values.schema.json", "          \"minimum\": 1,\n          \"maximum\": 4\n", "          \"minimum\": 1\n", "chart", "chart: the schema takes 5 builds at once"),
+ ("deploy/helm/flawrook-agent/templates/_helpers.tpl", "{{- if .Values.image.digest -}}", "{{- if false -}}", "chart", "chart: the digest ignored"),
+ ("deploy/helm/flawrook-agent/templates/_helpers.tpl", "{{- .Values.flawrook.existingSecret | default (include \"flawrook-agent.fullname\" .) -}}", "{{- include \"flawrook-agent.fullname\" . -}}", "chart", "chart: existingSecret ignored"),
+ ("deploy/helm/flawrook-agent/templates/secret.yaml", "{{- if not .Values.flawrook.existingSecret }}", "{{- if true }}", "chart", "chart: its own Secret beside existingSecret"),
+ ("deploy/helm/flawrook-agent/values.schema.json", "  \"additionalProperties\": false,\n  \"required\": [\"flawrook\", \"image\", \"resources\", \"scratch\"],", "  \"required\": [\"flawrook\", \"image\", \"resources\", \"scratch\"],", "chart", "chart: the schema takes unknown keys"),
+ ("deploy/helm/flawrook-agent/values.schema.json", "\"oneOf\": [", "\"x-oneOf\": [", "chart", "chart: the schema without its token rule"),
+ ("deploy/helm/flawrook-agent/values.schema.json", "\"pattern\": \"^https://", "\"pattern\": \"^https?://", "chart", "chart: the schema takes plain http"),
+ ("deploy/helm/flawrook-agent/values.schema.json", "\"required\": [\"memory\"],", "\"required\": [],", "chart", "chart: the schema takes no memory limit"),
 ]
 
 # One mutant per line the unit-file test asserts: removing any one must fail it.
@@ -161,14 +196,18 @@ for f, old, new, pkg, what in M:
         sys.exit(f"mutant {what!r}: its text isn't in {f} exactly once; update the list")
     open(p, "w").write(orig.replace(old, new))
     try:
-        r = subprocess.run(["scripts/docker-go.sh", "test", "-count=1", *pkg.split()], cwd=A, capture_output=True, text=True)
+        if pkg == "chart":
+            r = subprocess.run(["test/chart-test.sh", os.path.join(A, "dist", "chart-mutant")], cwd=A, capture_output=True, text=True,
+                               env={**os.environ, "KUBECONFORM": "skip"})
+        else:
+            r = subprocess.run(["scripts/docker-go.sh", "test", "-count=1", *pkg.split()], cwd=A, capture_output=True, text=True)
     finally:
         open(p, "w").write(orig)
         assert hashlib.sha256(open(p).read().encode()).hexdigest() == h, f"{f} not restored"
     died = r.returncode != 0
     by_build = "[build failed]" in r.stdout or "setup failed" in r.stdout
-    if what == CONTROL:
-        control_ok = not died
+    if what.startswith(CONTROL):
+        control_ok = control_ok is not False and not died
     elif died and not by_build:
         killed += 1
     elif died:

@@ -1,0 +1,136 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "flawrook-agent.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "flawrook-agent.labels" . | nindent 4 }}
+spec:
+  # One agent per cluster: a second would report the same cluster again.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "flawrook-agent.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "flawrook-agent.labels" . | nindent 8 }}
+      {{- if not .Values.flawrook.existingSecret }}
+      annotations:
+        # A new token rolls the pod, which reads it when it starts.
+        checksum/token: {{ .Values.flawrook.token | sha256sum }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "flawrook-agent.serviceAccountName" . }}
+      # The agent reads the Kubernetes API with its ServiceAccount's own token.
+      automountServiceAccountToken: true
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: agent
+          image: {{ include "flawrook-agent.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # No probes: the agent has no listener. A stuck agent shows as stale in FlawRook after 24 hours.
+          terminationMessagePolicy: FallbackToLogsOnError
+          env:
+            - name: FLAWROOK_MODE
+              value: cluster
+            - name: FLAWROOK_URL
+              value: {{ .Values.flawrook.url | quote }}
+            # Resolved by the kubelet when the pod starts; the agent itself never reads a Secret.
+            - name: FLAWROOK_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "flawrook-agent.tokenSecret" . }}
+                  key: {{ include "flawrook-agent.tokenKey" . }}
+            # GOMEMLIMIT isn't set: the agent derives it from its cgroup's memory limit.
+            - name: TMPDIR
+              value: /scratch
+            {{- with .Values.clusterName }}
+            - name: FLAWROOK_CLUSTER_NAME
+              value: {{ . | quote }}
+            {{- end }}
+            - name: FLAWROOK_INTERVAL
+              value: {{ .Values.interval | quote }}
+            {{- with .Values.namespaces.include }}
+            - name: FLAWROOK_NAMESPACES_INCLUDE
+              value: {{ join "," . | quote }}
+            {{- end }}
+            {{- with .Values.namespaces.exclude }}
+            - name: FLAWROOK_NAMESPACES_EXCLUDE
+              value: {{ join "," . | quote }}
+            {{- end }}
+            - name: FLAWROOK_SBOM_MAX_IMAGE_BYTES
+              value: {{ printf "%d" (.Values.sbom.maxImageBytes | int64) | quote }}
+            - name: FLAWROOK_SBOM_CONCURRENCY
+              value: {{ printf "%d" (.Values.sbom.concurrency | int64) | quote }}
+            {{- with .Values.proxy.httpsProxy }}
+            - name: HTTPS_PROXY
+              value: {{ . | quote }}
+            - name: NO_PROXY
+              value: {{ join "," (compact (list "kubernetes.default.svc" ".svc" ".cluster.local" $.Values.proxy.noProxy)) | quote }}
+            {{- end }}
+            {{- if .Values.caBundle.configMap }}
+            - name: FLAWROOK_CA_FILE
+              value: /etc/flawrook/ca/{{ .Values.caBundle.key }}
+            {{- end }}
+            {{- if .Values.registryCredentials.existingSecret }}
+            # The registry credentials as a Docker config file, which the image pulls read.
+            - name: DOCKER_CONFIG
+              value: /etc/flawrook/registry
+            {{- end }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: scratch
+              mountPath: /scratch
+            {{- if .Values.caBundle.configMap }}
+            - name: ca
+              mountPath: /etc/flawrook/ca
+              readOnly: true
+            {{- end }}
+            {{- if .Values.registryCredentials.existingSecret }}
+            - name: registry
+              mountPath: /etc/flawrook/registry
+              readOnly: true
+            {{- end }}
+      volumes:
+        # An image's layers while its SBOM is built, removed after each image. On disk, not in memory.
+        - name: scratch
+          emptyDir:
+            sizeLimit: {{ .Values.scratch.sizeLimit }}
+        {{- if .Values.caBundle.configMap }}
+        - name: ca
+          configMap:
+            name: {{ .Values.caBundle.configMap }}
+            items:
+              - key: {{ .Values.caBundle.key }}
+                path: {{ .Values.caBundle.key }}
+        {{- end }}
+        {{- if .Values.registryCredentials.existingSecret }}
+        - name: registry
+          secret:
+            secretName: {{ .Values.registryCredentials.existingSecret }}
+            items:
+              - key: .dockerconfigjson
+                path: config.json
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

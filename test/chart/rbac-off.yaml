@@ -1,0 +1,8 @@
+# The cluster's admins bind the rules and provide the ServiceAccount themselves; the default address.
+flawrook:
+  token: flra_chart0test0token
+rbac:
+  create: false
+serviceAccount:
+  create: false
+  name: acme-flawrook

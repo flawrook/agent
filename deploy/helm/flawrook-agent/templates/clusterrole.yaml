@@ -1,0 +1,18 @@
+{{- if .Values.rbac.create }}
+# Read-only, and only this: kube-system, whose id names the cluster, and the lists and watches of pods and nodes.
+# No Secrets, no ConfigMaps, no other namespace, no exec, no logs, nothing created or changed.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "flawrook-agent.fullname" . }}
+  labels:
+    {{- include "flawrook-agent.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    resourceNames: ["kube-system"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["pods", "nodes"]
+    verbs: ["list", "watch"]
+{{- end }}

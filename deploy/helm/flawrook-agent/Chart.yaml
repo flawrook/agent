@@ -1,0 +1,20 @@
+apiVersion: v2
+name: flawrook-agent
+description: |
+  FlawRook agent, cluster mode: reports a Kubernetes cluster's nodes, workloads and the images they run to
+  FlawRook. Reads pods, nodes and namespaces only; outbound HTTPS only, no port opened, no Secret read.
+type: application
+# Both are set to the agent's version when a release is published (.github/workflows/release-sign.yml).
+version: 0.0.0
+appVersion: 0.0.0
+# sizeLimit on the scratch emptyDir is enforced from 1.25 (local storage capacity isolation, GA).
+kubeVersion: ">=1.25.0-0"
+home: https://github.com/flawrook/agent
+sources:
+  - https://github.com/flawrook/agent
+keywords:
+  - security
+  - sbom
+  - vulnerabilities
+annotations:
+  licenses: Apache-2.0
