@@ -1,4 +1,5 @@
-# FlawRook's own scan of this repository (https://flawrook.dev/docs/ci-api): go.mod goes to the CI API on
+# FlawRook's own scan of this repository (https://flawrook.dev/docs/ci-api): the repository is connected
+# to FlawRook through GitHub, so one request names the commit and FlawRook reads the files itself, on
 # every push to main (the baseline) and on every pull request (a change compared with the baseline).
 # The job fails on a new P1 or P2 finding the change brought in; when FlawRook can't be reached it
 # ends with a warning and the workflow goes on. FLAWROOK_TOKEN is a repository secret.
@@ -12,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Send go.mod to FlawRook
+      - name: Ask FlawRook to check this commit
         env:
           FLAWROOK_TOKEN: ${{ secrets.FLAWROOK_TOKEN }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
@@ -21,12 +22,12 @@ jobs:
           [ -n "$FLAWROOK_TOKEN" ] || { echo "::warning::FlawRook: FLAWROOK_TOKEN is not set, the change was not checked"; exit 0; }
           code=$(curl -sS -m 600 -o flawrook.json -w '%{http_code}' https://flawrook.dev/api/v1/ci/runs \
             -H "Authorization: Bearer $FLAWROOK_TOKEN" \
-            -F file=@go.mod -F path=go.mod \
             -F repo=${GITHUB_SERVER_URL#https://}/$GITHUB_REPOSITORY \
             -F ref=${GITHUB_HEAD_REF:-$GITHUB_REF_NAME} \
-            -F default_branch=$DEFAULT_BRANCH -F commit=$HEAD_SHA 2>/dev/null) || code=000
+            -F default_branch=$DEFAULT_BRANCH -F commit=$HEAD_SHA 2>/dev/null)
+          case "$code" in [1-9][0-9][0-9]) ;; *) code=000 ;; esac
           if [ "$code" != 200 ]; then
-            echo "::warning::FlawRook: go.mod was not checked ($( [ "$code" = 000 ] && echo "no connection" || echo "HTTP $code"))"
+            echo "::warning::FlawRook: the commit was not checked ($( [ "$code" = 000 ] && echo "no connection" || echo "HTTP $code"))"
             exit 0
           fi
           new=$(jq -r '.summary.new.p1 + .summary.new.p2' flawrook.json)
