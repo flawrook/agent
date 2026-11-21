@@ -23,6 +23,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"flawrook.dev/agent/internal/mounts"
 )
@@ -230,6 +231,20 @@ func TestNarrowedScanFindsTheHostButNotApplicationTrees(t *testing.T) {
 	want := []string{"libssl3t64 3.5.4-1~deb13u1", "node 18.20.5", "node 20.18.1", "node 22.11.0"}
 	if !reflect.DeepEqual(found, want) {
 		t.Fatalf("found %q, want %q", found, want)
+	}
+}
+
+func TestStatsLine(t *testing.T) {
+	for _, c := range []struct {
+		s    Stats
+		want string
+	}{
+		{Stats{Packages: 335, Elapsed: 28*time.Second + 400*time.Millisecond, MaxRSSKiB: 122880}, "scan 28 s, 335 packages, peak 120 MiB"},
+		{Stats{Packages: 1, Elapsed: 2340 * time.Millisecond, MaxRSSKiB: 1}, "scan 2.3 s, 1 package, peak 0 MiB"},
+	} {
+		if got := c.s.Line(); got != c.want {
+			t.Errorf("%+v: %q, want %q", c.s, got, c.want)
+		}
 	}
 }
 

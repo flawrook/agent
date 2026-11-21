@@ -111,7 +111,7 @@ func run() int {
 			// Only what the catalogers read is walked (inventory.Narrow), less the skipped mounts.
 			sbom, stats, err := inventory.Build(ctx, "/", version, append(mounts.Patterns(skip), inventory.Narrow("/", cfg.IncludeMounts)...))
 			if err == nil {
-				log.Info("inventory built", "packages", stats.Packages, "ms", stats.Elapsed.Milliseconds(), "maxRssKiB", stats.MaxRSSKiB)
+				log.Info(stats.Line(), "packages", stats.Packages, "ms", stats.Elapsed.Milliseconds(), "maxRssKiB", stats.MaxRSSKiB)
 			}
 			return sbom, err
 		},

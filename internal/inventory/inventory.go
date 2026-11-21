@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"syscall"
 	"time"
 
@@ -55,6 +56,21 @@ type Stats struct {
 	Elapsed   time.Duration
 	MaxRSSKiB int64 // the process's peak so far
 	Used      []string
+}
+
+// Line is the scan in words, for the journal: "scan 28 s, 335 packages, peak 120 MiB". The peak is the
+// process's so far.
+func (s Stats) Line() string {
+	secs := s.Elapsed.Seconds()
+	took := fmt.Sprintf("%.0f s", secs)
+	if secs < 10 {
+		took = fmt.Sprintf("%.1f s", secs)
+	}
+	packages := "packages"
+	if s.Packages == 1 {
+		packages = "package"
+	}
+	return fmt.Sprintf("scan %s, %d %s, peak %d MiB", took, s.Packages, packages, (s.MaxRSSKiB+512)/1024)
 }
 
 // Build scans the filesystem under root and returns Syft's CycloneDX JSON. skip adds exclusions to Skip,

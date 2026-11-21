@@ -71,6 +71,7 @@ M = [
  ("internal/inventory/narrow.go", "\t\tif r := resolved(root, a); r != \"\" {", "\t\tif r := resolved(root, a); false && r != \"\" {", "./internal/inventory/", "an allowed path through a symlink not resolved"),
  ("internal/inventory/narrow.go", "\t\tif err != nil || rel == \"..\" || strings.HasPrefix(rel, \"../\") {", "\t\tif err != nil {", "./internal/inventory/", "a symlink out of root resolved"),
  ("internal/inventory/narrow.go", "\t\"/usr/local/bin\", \"/usr/local/sbin\", \"/usr/local/lib\", \"/usr/local/go\",", "\t\"/usr/local/sbin\", \"/usr/local/lib\", \"/usr/local/go\",", "./internal/inventory/", "/usr/local/bin not read"),
+ ("internal/inventory/inventory.go", "\tif secs < 10 {", "\tif secs < 0 {", "./internal/inventory/", "scan line: no tenths under 10 s"),
  ("internal/config/config.go", "\t} else if v := s.Env(\"FLAWROOK_INCLUDE_MOUNTS\"); v != \"\" {", "\t} else if v := s.Env(\"FLAWROOK_INCLUDE_MOUNTS\"); false && v != \"\" {", "./internal/config/", "include_mounts env ignored"),
  ("internal/config/config.go", "func (c Config) Equal(o Config) bool { return reflect.DeepEqual(c, o) }", "func (c Config) Equal(o Config) bool { _ = reflect.DeepEqual; return c.URL == o.URL && c.Token == o.Token }", "./internal/config/", "Equal blind to include_mounts"),
  ("internal/inventory/inventory.go", "Exclude: source.ExcludeConfig{Paths: append(append([]string(nil), Skip...), skip...)}", "Exclude: source.ExcludeConfig{Paths: append(append([]string(nil), Skip...), skip[:0]...)}", "./internal/inventory/", "mount exclusions not applied"),

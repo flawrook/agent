@@ -23,6 +23,8 @@ FlawRook. FlawRook matches it against vulnerability data. The agent runs as a sy
 - Go's heap is held to 96 MiB (`GOMEMLIMIT`), and the whole process is capped at 256 MB (`MemoryMax=256M`).
 - The measured peak is 108 to 149 MB, on Debian 12 and 13, Ubuntu 24.04, Alpine 3.20 and Rocky Linux 9 test hosts and on runtime images (Node.js, Python, PHP, Redis, nginx, Go). The binary itself is a large part of that.
 - A scan took under 4 seconds on those hosts.
+- Large application trees don't add to it, since it doesn't walk them. On a test host with 310,000 files of `node_modules`, web roots and a kernel source tree, a scan took 0.9 seconds and peaked at 136 MB. Version 0.1.0 walked every directory: there it needed 74 seconds and 365 MB, and the unit's 256 MB cap stopped it.
+- Each scan logs one line, such as `scan 0.9 s, 108 packages, peak 136 MiB`: `journalctl -u flawrook-agent`.
 
 **CPU and disk priority.**
 - The scan yields to everything else: CPU at the lowest priority (`Nice=19`) and disk reads at the lowest best-effort level (`IOSchedulingClass=best-effort`, `IOSchedulingPriority=7`).
