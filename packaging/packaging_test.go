@@ -45,8 +45,9 @@ func TestTheSystemdUnit(t *testing.T) {
 	}
 	for _, want := range []string{
 		"ExecStart=/usr/bin/flawrook-agent",
-		// A shell's own kill: a minimal Debian has no /bin/kill (procps), and the reload failed there.
-		"ExecReload=/bin/sh -c 'kill -HUP $$MAINPID'",
+		// The agent signals itself: no shell (systemd 235 to 238's filter stops one), no /bin/kill (a minimal
+		// Debian has no procps, and the reload failed there).
+		"ExecReload=/usr/bin/flawrook-agent --reload $MAINPID",
 		// Caps.
 		"Environment=GOMEMLIMIT=96MiB",
 		"MemoryMax=256M",
@@ -63,6 +64,8 @@ func TestTheSystemdUnit(t *testing.T) {
 		// and the refusal isn't restarted.
 		"Environment=FLAWROOK_SERVICE=1",
 		"RestartPreventExitStatus=78",
+		// systemd 237 gives it no HOME, and Syft's home lookup runs getent, a process the filter stops.
+		"Environment=HOME=/var/lib/flawrook",
 		// Read-only but its state directory.
 		"StateDirectory=flawrook",
 		"StateDirectoryMode=0700",
@@ -84,7 +87,8 @@ func TestTheSystemdUnit(t *testing.T) {
 		"LockPersonality=yes",
 		"MemoryDenyWriteExecute=yes",
 		"SystemCallArchitectures=native",
-		"SystemCallFilter=@system-service",
+		// @system-service, and for systemd 235 to 238, which doesn't know it, the sets and calls the agent makes.
+		"SystemCallFilter=@system-service @basic-io @file-system @io-event @network-io @process @resources @signal getrandom ioctl madvise sched_getaffinity uname",
 		// Outbound only.
 		"RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX",
 		"SocketBindDeny=any",

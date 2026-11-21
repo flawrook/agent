@@ -63,11 +63,22 @@ func run() int {
 	dryRun := fs.Bool("dry-run", false, "print the exact report, before gzip, and send nothing")
 	interval := fs.Duration("interval", time.Hour, "for testing only: the time between runs")
 	showVersion := fs.Bool("version", false, "print the version")
+	reloadPID := fs.String("reload", "", "for the unit's ExecReload= only: send SIGHUP to the running agent, $MAINPID")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		return 2
 	}
 	if *showVersion {
 		fmt.Printf("flawrook-agent %s (protocol %d, %s)\n", version, report.Protocol, runtime.Version())
+		return 0
+	}
+	// --reload does that and nothing else, whatever its value: an empty one is refused, not an agent started.
+	reloading := false
+	fs.Visit(func(f *flag.Flag) { reloading = reloading || f.Name == "reload" })
+	if reloading {
+		if err := reload(*reloadPID, os.Getenv, "/proc", syscall.Kill); err != nil {
+			fmt.Fprintln(os.Stderr, "flawrook-agent:", err)
+			return 1
+		}
 		return 0
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))

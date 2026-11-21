@@ -29,7 +29,7 @@ import hashlib, os, re, subprocess, sys
 A = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # apps/agent
 
 M = [
- ("packaging/flawrook-agent.service", "ExecReload=/bin/sh -c 'kill -HUP $$MAINPID'", "ExecReload=/bin/kill -HUP $MAINPID", "./packaging/", "reload through /bin/kill"),
+ ("packaging/flawrook-agent.service", "ExecReload=/usr/bin/flawrook-agent --reload $MAINPID", "ExecReload=/bin/sh -c 'kill -HUP $$MAINPID'", "./packaging/", "reload through a shell"),
  ("internal/hostinfo/hostinfo.go", "mac := hmac.New(sha256.New, machineID[:])\n\tmac.Write(AppID[:])", "mac := hmac.New(sha256.New, AppID[:])\n\tmac.Write(machineID[:])", "./internal/hostinfo/", "HMAC key and message swapped"),
  ("internal/hostinfo/hostinfo.go", '{r.path("etc/machine-id"), SourceMachineID},\n\t\t{r.path("var/lib/dbus/machine-id"), SourceDbusMachineID},', '{r.path("var/lib/dbus/machine-id"), SourceDbusMachineID},\n\t\t{r.path("etc/machine-id"), SourceMachineID},', "./internal/hostinfo/", "dbus before /etc/machine-id"),
  ("internal/hostinfo/hostinfo.go", '|| text == strings.Repeat("0", 32)', '', "./internal/hostinfo/", "all-zero machine id accepted"),
@@ -68,6 +68,7 @@ M = [
  ("internal/inventory/narrow.go", "\t\t\tcase e.IsDir():", "\t\t\tcase e.IsDir() || e.Type()&os.ModeSymlink != 0:", "./internal/inventory/", "a symlink on the way followed"),
  ("internal/inventory/narrow.go", "\t\t\tcase !keep[e.Name()]:", "\t\t\tcase false && !keep[e.Name()]:", "./internal/inventory/", "nothing excluded"),
  ("internal/inventory/narrow.go", "\tallowed := append(append([]string(nil), Read...), include...)", "\tallowed := append([]string(nil), Read...)", "./internal/inventory/", "include_mounts narrowed away"),
+ ("packaging/flawrook-agent.service", " sched_getaffinity uname\n", " sched_getaffinity\n", "./packaging/", "unit filter without uname (systemd 235 to 238)"),
  ("internal/inventory/narrow.go", "\t\tif r := resolved(root, a); r != \"\" {", "\t\tif r := resolved(root, a); false && r != \"\" {", "./internal/inventory/", "an allowed path through a symlink not resolved"),
  ("internal/inventory/narrow.go", "\t\tif err != nil || rel == \"..\" || strings.HasPrefix(rel, \"../\") {", "\t\tif err != nil {", "./internal/inventory/", "a symlink out of root resolved"),
  ("internal/inventory/narrow.go", "\t\"/usr/local/bin\", \"/usr/local/sbin\", \"/usr/local/lib\", \"/usr/local/go\",", "\t\"/usr/local/sbin\", \"/usr/local/lib\", \"/usr/local/go\",", "./internal/inventory/", "/usr/local/bin not read"),
@@ -88,6 +89,11 @@ M = [
  ("internal/priority/priority.go", "\tioprioClassBE    = 2  // IOPRIO_CLASS_BE, best-effort", "\tioprioClassBE    = 3  // IOPRIO_CLASS_BE, best-effort", "./internal/priority/", "the idle IO class"),
  ("internal/priority/priority.go", "\tlowestIOLevel    = 7", "\tlowestIOLevel    = 4", "./internal/priority/", "IO level 4"),
  ("internal/priority/priority.go", "\tlowestNice       = 19", "\tlowestNice       = 10", "./internal/priority/", "nice 10"),
+ # 0.2.0: --reload, the unit's ExecReload= (no shell, which systemd 235 to 238's filter stops).
+ ("cmd/flawrook-agent/reload.go", "\tif err != nil || pid <= 1 {", "\tif err != nil || pid < 0 {", "./cmd/flawrook-agent/", "--reload signals 0 or 1"),
+ ("cmd/flawrook-agent/reload.go", "err != nil || mainPID != pid {", "false && (err != nil || mainPID != pid) {", "./cmd/flawrook-agent/", "--reload without the MAINPID check"),
+ ("cmd/flawrook-agent/reload.go", "name != \"flawrook-agent\" {", "false && name != \"flawrook-agent\" {", "./cmd/flawrook-agent/", "--reload signals any program"),
+ ("cmd/flawrook-agent/reload.go", "errors.Is(err, syscall.ESRCH) {", "false && errors.Is(err, syscall.ESRCH) {", "./cmd/flawrook-agent/", "--reload: a gone agent not said"),
 ]
 
 # One mutant per line the unit-file test asserts: removing any one must fail it.

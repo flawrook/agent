@@ -7,8 +7,9 @@ After=network-online.target
 [Service]
 Type=simple
 ExecStart=/usr/bin/flawrook-agent
-# A shell's own kill: a minimal system (Debian without procps) has no kill program. $$ is a literal $.
-ExecReload=/bin/sh -c 'kill -HUP $$MAINPID'
+# The agent itself sends the running agent SIGHUP: no shell, which the system call filter of systemd 235 to 238
+# stops, and no kill program, which a minimal Debian (no procps) lacks. It signals only $MAINPID, a flawrook-agent.
+ExecReload=/usr/bin/flawrook-agent --reload $MAINPID
 Restart=on-failure
 RestartSec=60
 
@@ -36,6 +37,9 @@ SupplementaryGroups=flawrook
 # and the refusal isn't restarted.
 Environment=FLAWROOK_SERVICE=1
 RestartPreventExitStatus=78
+# A home of its own: systemd 237 gives a DynamicUser= service no HOME, and Syft's home lookup then runs getent,
+# a process the system call filter stops.
+Environment=HOME=/var/lib/flawrook
 
 # Read-only everywhere but /var/lib/flawrook, which keeps the generated host id when there's no machine id.
 StateDirectory=flawrook
@@ -58,7 +62,10 @@ RestrictSUIDSGID=yes
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
 SystemCallArchitectures=native
-SystemCallFilter=@system-service
+# @system-service came with systemd 239. Before it (235 to 238, Ubuntu 18.04) systemd ignores the name and
+# allows @default only, and the agent died of SIGSYS. The 235-era sets and calls after it are what the agent
+# makes (strace, 0.2.0): inside @system-service on 239 and later, so there they change nothing.
+SystemCallFilter=@system-service @basic-io @file-system @io-event @network-io @process @resources @signal getrandom ioctl madvise sched_getaffinity uname
 
 # Outbound only: HTTPS over IPv4 or IPv6, Unix sockets for the resolver, and no port ever bound.
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX

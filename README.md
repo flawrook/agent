@@ -82,6 +82,51 @@ Or in two steps, which keeps the token out of your shell history:
 
 It needs systemd 235 or newer: Debian 10, Ubuntu 18.04, RHEL, Rocky Linux and AlmaLinux 8, or later. An older systemd ignores `DynamicUser`, and the agent would run as root. So on an older systemd, or one whose version it can't read, `install.sh` stops before it installs anything. The deb or rpm installed by itself puts its files in place, but neither enables nor starts the service, and says why. If an older systemd starts it all the same (a unit enabled by hand), the agent sees it runs as root under systemd, logs why and stops with exit status 78, which the unit doesn't restart. A root shell that inherits systemd's `INVOCATION_ID` (`systemd-run --shell`, or `su` without `-` inside a systemd user unit) is refused the same way: run the agent there with `env -u INVOCATION_ID flawrook-agent`. Alpine and other systems without systemd have no such floor.
 
+## The unit's hardening, by systemd version
+
+`install.sh` and the packages need systemd 235 or newer. Each line of the unit needs the systemd version shown, from
+the "Added in version" notes in `systemd.exec(5)` and `systemd.resource-control(5)`, and from systemd's NEWS where one
+note covers several settings. A systemd older than a line logs `Unknown key name '…' in section 'Service', ignoring`
+for it and starts the agent without that one protection; every other line still applies.
+
+| Line | systemd | What it does |
+|---|---|---|
+| `NoNewPrivileges=yes` | 187 | Neither the agent nor anything it starts can gain privileges (setuid files, file capabilities) |
+| `SystemCallFilter=@system-service @basic-io …` | 187; the `@system-service` set 239 | Only the system calls ordinary services make, and on 235 to 238 the ones the agent makes: see below |
+| `SystemCallArchitectures=native` | 209 | No system calls through another architecture's ABI |
+| `PrivateDevices=yes` | 209 | No device nodes but the pseudo devices (`/dev/null`, `/dev/urandom`) |
+| `RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX` | 211 | IP and local sockets only |
+| `ProtectHome=read-only` | 214 | Home directories read-only |
+| `MemoryMax=256M` | 231 | Stopped above 256 MB |
+| `RestrictRealtime=yes`, `MemoryDenyWriteExecute=yes` | 231 | No realtime scheduling; no memory both writable and executable |
+| `DynamicUser=yes` | 232 | A user of its own, made at start. Before 232 systemd ignores it and the agent would run as root: the 235 floor, and the agent's own refusal of root (exit status 78), cover that |
+| `ProtectSystem=strict` | 232 (`strict`) | The whole file system read-only, but its state directory |
+| `ProtectKernelTunables=yes`, `ProtectKernelModules=yes`, `ProtectControlGroups=yes` | 232 | `/proc/sys`, `/sys` and the cgroup tree read-only; no module loading |
+| `RestrictNamespaces=yes` | 233 | No new namespaces |
+| `StateDirectory=flawrook`, `StateDirectoryMode=0700` | 235 | `/var/lib/flawrook`, the one place it may write |
+| `LockPersonality=yes` | 235 | Its execution domain can't change |
+| `ProtectHostname=yes`, `RestrictSUIDSGID=yes` | 242 | The hostname can't change; it can't make setuid or setgid files |
+| `ProtectKernelLogs=yes` | 244 | No kernel log |
+| `ProtectClock=yes` | 245 | The clock can't be set |
+| `ProtectProc=invisible` | 247 | Other users' processes are hidden in `/proc` |
+| `SocketBindDeny=any` | 249 | It can't bind a port, so nothing listens |
+| `CapabilityBoundingSet=` (empty), `SupplementaryGroups=flawrook`, `PrivateTmp=yes`, `UMask=0077`, `Nice=19`, `IOSchedulingClass=best-effort`, `IOSchedulingPriority=7` | every supported version | No capabilities; its settings through the flawrook group; a private `/tmp`; its files its own; the lowest CPU priority and the lowest IO priority that still progresses |
+
+So on systemd 235 to 248 the agent runs with fewer protections, but with the same user, file system and network
+rules: Debian 10 (241) and 11 (247), Ubuntu 18.04 (237) and 20.04 (245), and RHEL, Rocky Linux and AlmaLinux 8 (239)
+lack some of the lines from 242 on. Debian 12, Ubuntu 22.04 and later, and RHEL 9 and later have them all.
+
+**systemd 235 to 238 (Ubuntu 18.04).** The `@system-service` set came with systemd 239. An older systemd logs
+`Unknown system call group, ignoring: @system-service` and allows only its `@default` set, so version 0.1.0 was
+stopped there at start, with SIGSYS. Since 0.2.0 the line also lists the sets and calls the agent makes, as
+those versions know them: `@basic-io @file-system @io-event @network-io @process @resources @signal` and
+`getrandom ioctl madvise sched_getaffinity uname`, taken from a trace of a full run. On 239 and later they all
+fall inside `@system-service`, so the filter there is the same as before. Under that filter the agent starts no
+other program, and two more lines see to it. `ExecReload=` runs `flawrook-agent --reload $MAINPID`, which sends
+the running agent its signal itself: version 0.1.0 used a shell, which those versions stop, so `systemctl reload`
+failed there. And `Environment=HOME=/var/lib/flawrook` gives the agent a home, which systemd doesn't give a
+`DynamicUser=` service: without one, the scanning library looks the home up by running `getent`.
+
 ## Settings
 
 `/etc/flawrook/agent.yaml`. A flag wins over the environment, which wins over this file. A misspelt key stops the agent at start.
