@@ -69,7 +69,7 @@ case "$FLAWROOK_URL" in http://127.0.0.1:* | http://localhost:*)
 esac
 caopts=""
 if [ -n "$STUB" ]; then
-  docker run -d --rm --name "$NET-stub" --network "$NET" --network-alias stub \
+  docker run -d --rm --name "$NET-stub" --network "$NET" --network-alias stub --memory 128m \
     -v "$PWD/dist/stub-linux-$ARCH:/stub:ro" -v "$OUT/stub:/out" \
     alpine:3.20 /stub -token "$FLAWROOK_TOKEN" -queue heartbeat:409 >/dev/null
   i=0
@@ -99,11 +99,11 @@ for image in $IMAGES; do
   names="$names $name"
   docker image inspect "$image" >/dev/null 2>&1 || docker pull -q "$image" >/dev/null
   docker image inspect "$image" --format "$image {{index .RepoDigests 0}}" >>"$OUT/images.txt"
-  run="docker run --network $NET --hostname it-$name -v $AGENT:/usr/bin/flawrook-agent:ro -e FLAWROOK_URL -e FLAWROOK_TOKEN $caopts"
+  run="docker run --network $NET --hostname it-$name --memory 512m --memory-swap 512m -v $AGENT:/usr/bin/flawrook-agent:ro -e FLAWROOK_URL -e FLAWROOK_TOKEN $caopts"
   $run --rm "$image" /usr/bin/flawrook-agent --dry-run >"$OUT/$name.dry-run.json" 2>"$OUT/$name.dry-run.log"
   $run -d --rm --name "$NET-$name" "$image" /usr/bin/flawrook-agent --interval 20s >/dev/null
   if [ -n "$forward" ]; then
-    docker run -d --rm --name "$NET-$name-fwd" --network "container:$NET-$name" -v "$PWD/dist/stub-linux-$ARCH:/stub:ro" \
+    docker run -d --rm --name "$NET-$name-fwd" --network "container:$NET-$name" --memory 64m -v "$PWD/dist/stub-linux-$ARCH:/stub:ro" \
       alpine:3.20 /stub -forward "127.0.0.1:$forward=host.docker.internal:$forward" >/dev/null
   fi
 done

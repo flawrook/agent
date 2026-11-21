@@ -51,9 +51,9 @@ cleanup() {
 }
 trap cleanup EXIT
 docker network create --internal "$NET" >/dev/null
-docker run -d --rm --name "$NET-stub" --network "$NET" --network-alias stub -v "$STUB:/stub:ro" -v "$OUT/stub:/out" \
+docker run -d --rm --name "$NET-stub" --network "$NET" --network-alias stub --memory 128m -v "$STUB:/stub:ro" -v "$OUT/stub:/out" \
   "$ALPINE" /stub -token flra_test >/dev/null
-docker run -d --rm --name "$NET-proxy" --network "$NET" --network-alias proxy -v "$STUB:/stub:ro" "$ALPINE" /stub -proxy :3128 >/dev/null
+docker run -d --rm --name "$NET-proxy" --network "$NET" --network-alias proxy --memory 128m -v "$STUB:/stub:ro" "$ALPINE" /stub -proxy :3128 >/dev/null
 i=0
 until [ -s "$OUT/stub/ca.pem" ]; do i=$((i + 1)); [ $i -lt 50 ] || { echo "the stub didn't start"; exit 1; }; sleep 0.2; done
 STUB_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$NET-stub")
@@ -64,7 +64,7 @@ PROXY_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{
 run() {
   name=$1 args=$2
   shift 2
-  docker run --rm --network "$NET" --hostname "proof-$name" -v "$AGENT:/usr/bin/flawrook-agent:ro" -v "$OUT:/out" \
+  docker run --rm --network "$NET" --hostname "proof-$name" --memory 512m -v "$AGENT:/usr/bin/flawrook-agent:ro" -v "$OUT:/out" \
     -e FLAWROOK_URL=https://stub:8443 -e FLAWROOK_TOKEN=flra_test -e FLAWROOK_CA_FILE=/out/stub/ca.pem "$@" "$TOOLS" sh -c "
       tcpdump -i any -n -U -w /out/$name.pcap 2>/dev/null & dump=\$!
       sleep 1
@@ -85,9 +85,9 @@ summary() {
     sort | uniq -c | awk '{print $2 "*" $1}' | tr '\n' ' ')
   unix=$(grep -c 'AF_UNIX' "$OUT/$name.strace" || true)
   # Docker's resolver remaps port 53 inside the container, so its packets are decoded as DNS by host, not port.
-  names=$(docker run --rm -v "$OUT:/out" "$TOOLS" tcpdump -r "/out/$name.pcap" -n -T domain 'udp and host 127.0.0.11' 2>/dev/null |
+  names=$(docker run --rm --memory 128m -v "$OUT:/out" "$TOOLS" tcpdump -r "/out/$name.pcap" -n -T domain 'udp and host 127.0.0.11' 2>/dev/null |
     grep -oE ' (A|AAAA)\? [^ ]+' | sed 's/ $//' | sort -u | tr '\n' ' ')
-  syns=$(docker run --rm -v "$OUT:/out" "$TOOLS" tcpdump -r "/out/$name.pcap" -n 'tcp[tcpflags] & (tcp-syn|tcp-ack) == tcp-syn' 2>/dev/null |
+  syns=$(docker run --rm --memory 128m -v "$OUT:/out" "$TOOLS" tcpdump -r "/out/$name.pcap" -n 'tcp[tcpflags] & (tcp-syn|tcp-ack) == tcp-syn' 2>/dev/null |
     grep -oE '> [0-9.]+\.[0-9]+:' | sort | uniq -c | awk '{print $3 "x" $1}' | tr '\n' ' ')
   echo "$name: connect() to ${endpoints:-nothing}; AF_UNIX ${unix}; DNS queries ${names:-none}; TCP SYNs to ${syns:-none}"
   # Allowed: the expected endpoint, and the resolver (127.0.0.11:53).

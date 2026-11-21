@@ -112,7 +112,7 @@ cp "dist/release/flawrook-agent-linux-$ARCH" "$OUT/upgrade-src/dist/pkg/flawrook
 case $ARCH in arm64) RPMARCH=aarch64 ;; *) RPMARCH=x86_64 ;; esac
 repack() { # version, deb or rpm, file name
   # shellcheck disable=SC2016 # sed matches release.sh's literal ${MAINTAINER:=…}
-  docker run --rm --label org.flawrook.agent=build -v "$OUT/upgrade-src":/src -w /src -e VERSION="$1" -e GOARCH="$ARCH" \
+  docker run --rm --label org.flawrook.agent=build --memory 512m -v "$OUT/upgrade-src":/src -w /src -e VERSION="$1" -e GOARCH="$ARCH" \
     -e MAINTAINER="$(sed -n 's/^: "${MAINTAINER:=\(.*\)}".*/\1/p' scripts/release.sh)" "$(sed -n 's/^NFPM_IMAGE=//p' scripts/release.sh)" \
     package --config packaging/nfpm.yaml --packager "$2" --target "dist/$3" >/dev/null
 }
@@ -138,7 +138,7 @@ cleanup() {
 }
 trap cleanup EXIT
 docker network create "$NET" >/dev/null
-docker run -d --rm --name "$NET-stub" --network "$NET" --network-alias stub --network-alias releases \
+docker run -d --rm --name "$NET-stub" --network "$NET" --network-alias stub --network-alias releases --memory 128m \
   -v "$PWD/dist/stub-linux-$ARCH:/stub:ro" -v "$OUT/stub:/out" -v "$OUT/releases:/releases:ro" \
   alpine:3.20 /stub -token "$T1,$T2" -releases /releases >/dev/null
 i=0
@@ -206,7 +206,7 @@ for image in debian:12 ubuntu:24.04 rockylinux:9 alpine:3.20; do
 done
 
 echo "debian:12, a tampered deb"
-result=$(docker run --rm --network "$NET" -v "$PWD/dist/release/install.sh:/install.sh:ro" \
+result=$(docker run --rm --network "$NET" --memory 512m -v "$PWD/dist/release/install.sh:/install.sh:ro" \
   -e FLAWROOK_RELEASE_URL=http://releases:8080/tampered -e FLAWROOK_TOKEN="$T1" \
   debian:12 sh -c "apt-get update -qq >/dev/null && apt-get install -y -qq curl >/dev/null 2>&1; sh /install.sh 2>&1 | grep -c 'checksums.txt says'; dpkg -s flawrook-agent >/dev/null 2>&1; echo installed=\$?")
 # shellcheck disable=SC2086 # split into words on purpose
@@ -250,7 +250,7 @@ for fake in "219:systemd 219" "235:systemd 235" "unreadable:systemd unknown"; do
   printf '#!/bin/sh\n[ "$1" = --version ] || exec /usr/bin/systemctl "$@"\necho "%s"\necho "+PAM +AUDIT +SELINUX"\n' "${fake#*:}" >"$OUT/fake/${fake%%:*}/systemctl"
   chmod 0755 "$OUT/fake/${fake%%:*}/systemctl"
 done
-docker run -d --rm --name "$NET-systemd" --network "$NET" --hostname it-systemd --privileged --cgroupns=host \
+docker run -d --rm --name "$NET-systemd" --network "$NET" --hostname it-systemd --privileged --cgroupns=host --memory 1g \
   -v /sys/fs/cgroup:/sys/fs/cgroup:rw --tmpfs /run --tmpfs /run/lock -v "$OUT/fake:/fake:ro" \
   -v "$PWD/dist/release/install.sh:/install.sh:ro" -v "$OUT/stub/ca.pem:/ca.pem:ro" flawrook-agent-test-systemd >/dev/null
 inside() { docker exec "$NET-systemd" sh -c "$1"; }
@@ -470,7 +470,7 @@ check "it read the token and reported again" "$(reported it-from010 report "${T1
 docker stop -t 2 "$NET-from010" >/dev/null
 
 echo "systemd 219 installed but not running (a chroot, an image build)"
-result=$(docker run --rm --network "$NET" -v "$OUT/fake:/fake:ro" -v "$PWD/dist/release/install.sh:/install.sh:ro" \
+result=$(docker run --rm --network "$NET" --memory 512m -v "$OUT/fake:/fake:ro" -v "$PWD/dist/release/install.sh:/install.sh:ro" \
   flawrook-agent-test-systemd sh -c "test -d /run/systemd/system && echo running || echo not-running
     PATH=/fake/219:\$PATH FLAWROOK_URL=https://stub:8443 FLAWROOK_TOKEN=$T1 FLAWROOK_RELEASE_URL=http://releases:8080/good sh /install.sh >/tmp/out 2>&1
     echo install=\$?; grep -c 'systemd 219 found' /tmp/out; dpkg -s flawrook-agent >/dev/null 2>&1; echo installed=\$?
@@ -489,7 +489,7 @@ check "and enables nothing" "$6" "0"
 echo "3. systemd as PID 1, rpm"
 printf 'FROM %s\nRUN dnf install -y -q systemd >/dev/null && dnf clean all >/dev/null\nCMD ["/usr/sbin/init"]\n' "$ROCKY" |
   docker build -q -t flawrook-agent-test-rocky-systemd - >/dev/null
-docker run -d --rm --name "$NET-rocky" --network "$NET" --hostname it-rocky --privileged --cgroupns=host \
+docker run -d --rm --name "$NET-rocky" --network "$NET" --hostname it-rocky --privileged --cgroupns=host --memory 1g \
   -v /sys/fs/cgroup:/sys/fs/cgroup:rw --tmpfs /run --tmpfs /run/lock \
   -v "$PWD/dist/release/install.sh:/install.sh:ro" -v "$OUT/stub/ca.pem:/ca.pem:ro" flawrook-agent-test-rocky-systemd >/dev/null
 rocky() { docker exec "$NET-rocky" sh -c "$1"; }

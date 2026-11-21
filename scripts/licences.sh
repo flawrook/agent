@@ -20,7 +20,7 @@
 set -eu
 GO_IMAGE=golang:1.27.2-bookworm@sha256:5cf287a799e6b94384bad13d16b14904c531f51ba65792237e122ce42b392f61
 cd "$(dirname "$0")/.."
-exec docker run --rm --label org.flawrook.agent=build -v "$PWD":/src -w /src \
+exec docker run --rm --label org.flawrook.agent=build --memory 1g -v "$PWD":/src -w /src \
   -v flawrook-agent-gomod:/go/pkg/mod -v flawrook-agent-gocache:/root/.cache/go-build \
   -e CGO_ENABLED=0 -e MODE="${1:-}" "$GO_IMAGE" sh -eu -c '
   list() { GOOS=linux GOARCH=$1 go list -deps -f "{{with .Module}}{{.Path}}@{{.Version}} {{.Dir}}{{end}}" ./cmd/flawrook-agent; }

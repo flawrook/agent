@@ -99,7 +99,7 @@ step() {
 
 # shellcheck disable=SC2317 # gofmt_clean, built_unit_is_packaged and artifacts run through step
 gofmt_clean() { # gofmt lists unformatted files; none may be listed (third_party holds licence texts only)
-  docker run --rm --label org.flawrook.agent=build -v "$PWD":/src -w /src "$GO_IMAGE" gofmt -l . | grep -v '^third_party/' | tee /dev/stderr | grep -q . && return 1
+  docker run --rm --label org.flawrook.agent=build --memory 512m -v "$PWD":/src -w /src "$GO_IMAGE" gofmt -l . | grep -v '^third_party/' | tee /dev/stderr | grep -q . && return 1
   return 0
 }
 # shellcheck disable=SC2317
@@ -140,7 +140,7 @@ echo "release gate $VERSION, logs in $OUT"
 step vet           0 scripts/docker-go.sh vet ./...
 step test          0 scripts/docker-go.sh test -count=1 -v ./...
 step gofmt         0 gofmt_clean
-step shellcheck    0 docker run --rm -v "$PWD":/mnt:ro --entrypoint sh "$SHELLCHECK_IMAGE" -c 'shellcheck -s sh /mnt/packaging/*.sh /mnt/scripts/*.sh /mnt/test/*.sh'
+step shellcheck    0 docker run --rm --memory 256m -v "$PWD":/mnt:ro --entrypoint sh "$SHELLCHECK_IMAGE" -c 'shellcheck -s sh /mnt/packaging/*.sh /mnt/scripts/*.sh /mnt/test/*.sh'
 step headers       0 scripts/headers.sh
 step licences      0 scripts/licences.sh --check
 step release       1 scripts/release.sh "$VERSION"

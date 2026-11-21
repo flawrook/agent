@@ -36,7 +36,7 @@ for arch in amd64 arm64; do
   cp "dist/release/flawrook-agent-linux-$arch" dist/pkg/flawrook-agent
   for packager in deb rpm; do
     case "$packager-$arch" in deb-*) target=flawrook-agent-$arch.deb ;; rpm-amd64) target=flawrook-agent-x86_64.rpm ;; rpm-arm64) target=flawrook-agent-aarch64.rpm ;; esac
-    docker run --rm --label org.flawrook.agent=build -v "$PWD":/src -w /src -e VERSION="$VERSION" -e GOARCH="$arch" -e MAINTAINER="$MAINTAINER" "$NFPM_IMAGE" \
+    docker run --rm --label org.flawrook.agent=build --memory 512m -v "$PWD":/src -w /src -e VERSION="$VERSION" -e GOARCH="$arch" -e MAINTAINER="$MAINTAINER" "$NFPM_IMAGE" \
       package --config packaging/nfpm.yaml --packager "$packager" --target "dist/release/$target" >/dev/null
   done
 done
