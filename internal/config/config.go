@@ -29,6 +29,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"time"
 
 	"go.yaml.in/yaml/v3"
 )
@@ -36,6 +37,11 @@ import (
 const (
 	DefaultURL  = "https://flawrook.dev"
 	DefaultPath = "/etc/flawrook/agent.yaml"
+
+	// Cluster mode's defaults (the cluster contract's configuration names); server mode ignores these settings.
+	DefaultClusterInterval   = time.Hour
+	DefaultSBOMMaxImageBytes = 1 << 30 // compressed layers; a larger image is reported too-large, not pulled
+	DefaultSBOMConcurrency   = 1
 )
 
 // Config is what one run of the agent uses.
@@ -50,6 +56,43 @@ type Config struct {
 	// ReadProtected says the unit was given CAP_DAC_READ_SEARCH (install.sh's FLAWROOK_READ_PROTECTED=1 drop-in),
 	// to read files no other user may; off, the agent reads what's world-readable, as the catalogers need.
 	ReadProtected bool
+
+	// Cluster mode (the Helm chart sets FLAWROOK_MODE=cluster). A zero value is the default; server mode ignores
+	// all of these, and cluster mode ignores Hostname, IncludeMounts and ReadProtected.
+	Mode              string        // "" or "server", or "cluster"
+	ClusterName       string        // shown instead of the cluster id; the chart's clusterName
+	Interval          time.Duration // between runs; 0 is DefaultClusterInterval
+	NamespacesInclude []string      // exact names; none means every namespace
+	NamespacesExclude []string
+	SBOMMaxImageBytes int64 // 0 is DefaultSBOMMaxImageBytes
+	SBOMConcurrency   int   // 0 is DefaultSBOMConcurrency
+}
+
+// Cluster says the agent runs in cluster mode.
+func (c Config) Cluster() bool { return c.Mode == "cluster" }
+
+// RunInterval is cluster mode's time between runs.
+func (c Config) RunInterval() time.Duration {
+	if c.Interval == 0 {
+		return DefaultClusterInterval
+	}
+	return c.Interval
+}
+
+// MaxImageBytes is the largest image, by its compressed layers, that cluster mode pulls.
+func (c Config) MaxImageBytes() int64 {
+	if c.SBOMMaxImageBytes == 0 {
+		return DefaultSBOMMaxImageBytes
+	}
+	return c.SBOMMaxImageBytes
+}
+
+// Concurrency is how many images cluster mode builds at once.
+func (c Config) Concurrency() int {
+	if c.SBOMConcurrency == 0 {
+		return DefaultSBOMConcurrency
+	}
+	return c.SBOMConcurrency
 }
 
 // Equal tells a SIGHUP whether the config changed.
@@ -66,6 +109,14 @@ type file struct {
 	// A list in the file; comma-separated as a flag or in the environment.
 	IncludeMounts []string `yaml:"include_mounts"`
 	ReadProtected bool     `yaml:"read_protected"`
+	// Cluster mode.
+	Mode              string   `yaml:"mode"`
+	ClusterName       string   `yaml:"cluster_name"`
+	Interval          string   `yaml:"interval"` // a Go duration, 10m to 24h
+	NamespacesInclude []string `yaml:"namespaces_include"`
+	NamespacesExclude []string `yaml:"namespaces_exclude"`
+	SBOMMaxImageBytes int64    `yaml:"sbom_max_image_bytes"`
+	SBOMConcurrency   int      `yaml:"sbom_concurrency"`
 }
 
 // The environment variables per key, the first set one wins.
@@ -78,6 +129,14 @@ var envNames = map[string][]string{
 	"no_proxy":    {"NO_PROXY", "no_proxy"},
 	// true or false, as strconv.ParseBool reads it (1, t, TRUE, ...).
 	"read_protected": {"FLAWROOK_READ_PROTECTED"},
+	// Cluster mode; the namespace lists are comma-separated.
+	"mode":                 {"FLAWROOK_MODE"},
+	"cluster_name":         {"FLAWROOK_CLUSTER_NAME"},
+	"interval":             {"FLAWROOK_INTERVAL"},
+	"namespaces_include":   {"FLAWROOK_NAMESPACES_INCLUDE"},
+	"namespaces_exclude":   {"FLAWROOK_NAMESPACES_EXCLUDE"},
+	"sbom_max_image_bytes": {"FLAWROOK_SBOM_MAX_IMAGE_BYTES"},
+	"sbom_concurrency":     {"FLAWROOK_SBOM_CONCURRENCY"},
 }
 
 // Sources are where the settings come from: the flags given on the command line (by key; a flag
@@ -137,6 +196,9 @@ func Load(s Sources) (Config, error) {
 		}
 		c.IncludeMounts = append(c.IncludeMounts, filepath.Clean(p))
 	}
+	if err := loadCluster(&c, f, pick, s.Flags); err != nil {
+		return Config{}, err
+	}
 	if c.URL == "" {
 		c.URL = DefaultURL
 	}
@@ -145,6 +207,64 @@ func Load(s Sources) (Config, error) {
 		return Config{}, err
 	}
 	return c, nil
+}
+
+// loadCluster reads cluster mode's settings, in the same order of precedence, and checks them.
+func loadCluster(c *Config, f file, pick func(key, fromFile string) string, flags map[string]string) error {
+	c.Mode = pick("mode", f.Mode)
+	switch c.Mode {
+	case "", "server", "cluster":
+	default:
+		return fmt.Errorf("mode: %q is neither server nor cluster", c.Mode)
+	}
+	c.ClusterName = strings.TrimSpace(pick("cluster_name", f.ClusterName))
+	if v := pick("interval", f.Interval); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d < 10*time.Minute || d > 24*time.Hour {
+			return fmt.Errorf("interval: %q is not a duration from 10m to 24h", v)
+		}
+		c.Interval = d
+	}
+	list := func(key string, fromFile []string) []string {
+		items := fromFile
+		if v := pick(key, ""); v != "" {
+			items = strings.Split(v, ",")
+		} else if _, ok := flags[key]; ok {
+			items = nil // given empty
+		}
+		var out []string
+		for _, n := range items {
+			if n = strings.TrimSpace(n); n != "" {
+				out = append(out, n)
+			}
+		}
+		return out
+	}
+	c.NamespacesInclude = list("namespaces_include", f.NamespacesInclude)
+	c.NamespacesExclude = list("namespaces_exclude", f.NamespacesExclude)
+	c.SBOMMaxImageBytes = f.SBOMMaxImageBytes
+	if v := pick("sbom_max_image_bytes", ""); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return fmt.Errorf("sbom_max_image_bytes: %q is not a whole number of bytes", v)
+		}
+		c.SBOMMaxImageBytes = n
+	}
+	if c.SBOMMaxImageBytes < 0 {
+		return fmt.Errorf("sbom_max_image_bytes: %d is negative", c.SBOMMaxImageBytes)
+	}
+	c.SBOMConcurrency = f.SBOMConcurrency
+	if v := pick("sbom_concurrency", ""); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("sbom_concurrency: %q is not a number from 1 to 4", v)
+		}
+		c.SBOMConcurrency = n
+	}
+	if c.SBOMConcurrency != 0 && (c.SBOMConcurrency < 1 || c.SBOMConcurrency > 4) {
+		return fmt.Errorf("sbom_concurrency: %d is not from 1 to 4", c.SBOMConcurrency)
+	}
+	return nil
 }
 
 func readFile(path string) (file, error) {

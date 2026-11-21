@@ -36,6 +36,11 @@ import (
 // never makes a host a new entry, and the raw machine id never leaves the host.
 var AppID = [16]byte{0x85, 0x2f, 0x49, 0x40, 0x35, 0x6a, 0x4c, 0x1f, 0x9a, 0x7a, 0x46, 0x1d, 0xed, 0x34, 0xe6, 0x65}
 
+// ClusterAppID is cluster mode's app id (0d39d953-f79f-4113-ae48-8b694c40e232), fixed for good and published:
+// cluster.id = HMAC-SHA256(key: the kube-system namespace UID's 16 bytes, message: these 16 bytes), the same rule
+// as hostId. Its own app id keeps cluster ids and host ids from ever sharing a value; the raw UID never leaves.
+var ClusterAppID = [16]byte{0x0d, 0x39, 0xd9, 0x53, 0xf7, 0x9f, 0x41, 0x13, 0xae, 0x48, 0x8b, 0x69, 0x4c, 0x40, 0xe2, 0x32}
+
 // The sources of the machine id, in order, as host.hostIdSource names them.
 const (
 	SourceMachineID     = "machine-id"
@@ -182,9 +187,24 @@ func readMachineID(path string) ([16]byte, bool) {
 	return m, true
 }
 
-func derive(machineID [16]byte) string {
-	mac := hmac.New(sha256.New, machineID[:])
-	mac.Write(AppID[:])
+func derive(machineID [16]byte) string { return appSpecific(machineID, AppID) }
+
+// ClusterID derives cluster.id from the kube-system namespace's metadata.uid, a UUID.
+func ClusterID(kubeSystemUID string) (string, error) {
+	var key [16]byte
+	text := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(kubeSystemUID), "-", ""))
+	if !machineIDFormat.MatchString(text) {
+		return "", fmt.Errorf("kube-system uid %q is not a UUID", kubeSystemUID)
+	}
+	_, _ = hex.Decode(key[:], []byte(text))
+	return appSpecific(key, ClusterAppID), nil
+}
+
+// appSpecific is HMAC-SHA256(key: an id's 16 bytes, message: an app id's 16 bytes) in lowercase hex, the way
+// systemd's sd_id128_get_machine_app_specific derives an app-specific id: hostId and cluster.id both.
+func appSpecific(id, app [16]byte) string {
+	mac := hmac.New(sha256.New, id[:])
+	mac.Write(app[:])
 	return hex.EncodeToString(mac.Sum(nil))
 }
 

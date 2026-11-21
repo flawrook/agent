@@ -15,6 +15,7 @@
 package hostinfo
 
 import (
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
@@ -213,3 +214,26 @@ func TestReadWithHostnameOverride(t *testing.T) {
 }
 
 func ptr(s string) *string { return &s }
+
+// The cluster id follows the host id's rule under its own app id; the vector is Python's
+// hmac.new(uuid.UUID(uid).bytes, uuid.UUID("0d39d953-…").bytes, sha256).hexdigest().
+func TestClusterID(t *testing.T) {
+	const uid = "3c8d3f0e-1b2a-4c5d-8e9f-0a1b2c3d4e5f"
+	const want = "3f3e059a7c415f303269830f1a5a8951c4b4aa5d4675d3378d2e8fe18e10081a"
+	for _, in := range []string{uid, strings.ToUpper(uid), " " + uid + "\n"} {
+		got, err := ClusterID(in)
+		if err != nil || got != want {
+			t.Fatalf("ClusterID(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+	var same [16]byte
+	_, _ = hex.Decode(same[:], []byte(strings.ReplaceAll(uid, "-", "")))
+	if derive(same) == want {
+		t.Fatal("a host id and a cluster id from the same 16 bytes must differ")
+	}
+	for _, bad := range []string{"", "kube-system", "3c8d3f0e-1b2a-4c5d-8e9f", strings.Repeat("g", 32)} {
+		if _, err := ClusterID(bad); err == nil {
+			t.Errorf("ClusterID(%q) accepted", bad)
+		}
+	}
+}

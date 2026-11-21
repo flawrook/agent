@@ -20,6 +20,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func writeFile(t *testing.T, text string) string {
@@ -198,5 +199,77 @@ func TestReadProtected(t *testing.T) {
 	}
 	if _, err := Load(Sources{Env: env(nil), Path: writeFile(t, "read_protected: maybe\n")}); err == nil {
 		t.Fatal("a file's non-boolean is accepted")
+	}
+}
+
+func TestClusterSettings(t *testing.T) {
+	path := writeFile(t, `mode: cluster
+cluster_name: " prod-eu "
+interval: 30m
+namespaces_include: [shop, data]
+namespaces_exclude: [kube-node-lease]
+sbom_max_image_bytes: 2147483648
+sbom_concurrency: 2
+`)
+	c, err := Load(Sources{Env: env(nil), Path: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := Config{URL: DefaultURL, Mode: "cluster", ClusterName: "prod-eu", Interval: 30 * time.Minute,
+		NamespacesInclude: []string{"shop", "data"}, NamespacesExclude: []string{"kube-node-lease"}, SBOMMaxImageBytes: 2 << 30, SBOMConcurrency: 2}
+	if !reflect.DeepEqual(c, want) {
+		t.Fatalf("got %+v\nwant %+v", c, want)
+	}
+	if !c.Cluster() || c.RunInterval() != 30*time.Minute || c.MaxImageBytes() != 2<<30 || c.Concurrency() != 2 {
+		t.Fatalf("accessors: %v %v %v %v", c.Cluster(), c.RunInterval(), c.MaxImageBytes(), c.Concurrency())
+	}
+
+	// The environment over the file (the chart sets these), lists comma-separated; a flag over both.
+	c, err = Load(Sources{Flags: map[string]string{"namespaces_exclude": ""}, Env: env(map[string]string{
+		"FLAWROOK_MODE": "cluster", "FLAWROOK_CLUSTER_NAME": "env-name", "FLAWROOK_INTERVAL": "2h",
+		"FLAWROOK_NAMESPACES_INCLUDE": " a, ,b ", "FLAWROOK_NAMESPACES_EXCLUDE": "c",
+		"FLAWROOK_SBOM_MAX_IMAGE_BYTES": "1000", "FLAWROOK_SBOM_CONCURRENCY": "4",
+	}), Path: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.ClusterName != "env-name" || c.Interval != 2*time.Hour || !reflect.DeepEqual(c.NamespacesInclude, []string{"a", "b"}) ||
+		c.NamespacesExclude != nil || c.SBOMMaxImageBytes != 1000 || c.SBOMConcurrency != 4 {
+		t.Fatalf("env and flags: %+v", c)
+	}
+}
+
+func TestClusterDefaultsAndServerMode(t *testing.T) {
+	c, err := Load(Sources{Env: env(nil), Path: filepath.Join(t.TempDir(), "none.yaml")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Cluster() || c.RunInterval() != time.Hour || c.MaxImageBytes() != 1<<30 || c.Concurrency() != 1 {
+		t.Fatalf("defaults: %+v", c)
+	}
+	c, err = Load(Sources{Env: env(map[string]string{"FLAWROOK_MODE": "server"}), Path: filepath.Join(t.TempDir(), "none.yaml")})
+	if err != nil || c.Cluster() || c.Mode != "server" {
+		t.Fatalf("server mode: %+v %v", c, err)
+	}
+}
+
+func TestClusterSettingsRefused(t *testing.T) {
+	for _, tc := range []struct {
+		env  map[string]string
+		want string
+	}{
+		{map[string]string{"FLAWROOK_MODE": "k8s"}, "mode"},
+		{map[string]string{"FLAWROOK_INTERVAL": "5m"}, "interval"},
+		{map[string]string{"FLAWROOK_INTERVAL": "25h"}, "interval"},
+		{map[string]string{"FLAWROOK_INTERVAL": "hourly"}, "interval"},
+		{map[string]string{"FLAWROOK_SBOM_MAX_IMAGE_BYTES": "1GiB"}, "sbom_max_image_bytes"},
+		{map[string]string{"FLAWROOK_SBOM_MAX_IMAGE_BYTES": "-1"}, "sbom_max_image_bytes"},
+		{map[string]string{"FLAWROOK_SBOM_CONCURRENCY": "5"}, "sbom_concurrency"},
+		{map[string]string{"FLAWROOK_SBOM_CONCURRENCY": "two"}, "sbom_concurrency"},
+	} {
+		_, err := Load(Sources{Env: env(tc.env), Path: filepath.Join(t.TempDir(), "none.yaml")})
+		if err == nil || !strings.HasPrefix(err.Error(), tc.want+":") {
+			t.Errorf("%v: got %v, want an error about %s", tc.env, err, tc.want)
+		}
 	}
 }

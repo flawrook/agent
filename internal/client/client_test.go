@@ -256,3 +256,54 @@ func TestARedirectIsNeverFollowed(t *testing.T) {
 		}
 	}
 }
+
+func TestClusterRoutes(t *testing.T) {
+	type seen struct{ Path, Encoding, Protocol string }
+	var mu sync.Mutex
+	var got []seen
+	big := `{"needed":[` + strings.Repeat(`{"digest":"sha256:`+strings.Repeat("a", 64)+`","platform":"linux/amd64"},`, 1000) + `{"digest":"x","platform":"y"}]}`
+	srv, ca := server(t, func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		got = append(got, seen{r.URL.Path, r.Header.Get("Content-Encoding"), r.Header.Get(ProtocolKey)})
+		mu.Unlock()
+		if r.URL.Path == ImagesNeededPath {
+			w.WriteHeader(200)
+			io.WriteString(w, big)
+			return
+		}
+		w.WriteHeader(202)
+	})
+	c, err := New(config.Config{URL: srv.URL, Token: "flra_x", CAFile: ca}, "flawrook-agent/test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if _, err := c.ClusterReport(ctx, []byte("gz")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.ClusterHeartbeat(ctx, []byte("{}")); err != nil {
+		t.Fatal(err)
+	}
+	res, err := c.ImagesNeeded(ctx, []byte("{}"))
+	if err != nil || res.Status != 200 || string(res.Body) != big {
+		t.Fatalf("images/needed: %d, %d of %d bytes, %v", res.Status, len(res.Body), len(big), err)
+	}
+	digest := "sha256:" + strings.Repeat("d", 64)
+	if _, err := c.ImageSBOM(ctx, digest, []byte("gz")); err != nil {
+		t.Fatal(err)
+	}
+	want := []seen{
+		{"/api/v1/agent/cluster/report", "gzip", "1"},
+		{"/api/v1/agent/cluster/heartbeat", "", "1"},
+		{"/api/v1/agent/cluster/images/needed", "", "1"},
+		{"/api/v1/agent/cluster/images/" + digest + "/sbom", "gzip", "1"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("requests %+v", got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("request %d: got %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}

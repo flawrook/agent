@@ -13,7 +13,8 @@
 // limitations under the License.
 
 // flawrook-agent reports a server's OS packages and runtimes to FlawRook every hour: outbound HTTPS
-// only, no port opened, no remote commands, read-only everywhere but its own state directory.
+// only, no port opened, no remote commands, read-only everywhere but its own state directory. In cluster mode
+// (the Helm chart's FLAWROOK_MODE=cluster) it reports a Kubernetes cluster's workloads, images and nodes instead.
 package main
 
 import (
@@ -30,9 +31,12 @@ import (
 	"time"
 
 	"flawrook.dev/agent/internal/agent"
+	"flawrook.dev/agent/internal/client"
+	"flawrook.dev/agent/internal/cluster"
 	"flawrook.dev/agent/internal/config"
 	"flawrook.dev/agent/internal/hostinfo"
 	"flawrook.dev/agent/internal/inventory"
+	"flawrook.dev/agent/internal/kube"
 	"flawrook.dev/agent/internal/mounts"
 	"flawrook.dev/agent/internal/priority"
 	"flawrook.dev/agent/internal/report"
@@ -60,8 +64,14 @@ func run() int {
 	fs.String("no-proxy", "", "hosts to reach without the proxy (env NO_PROXY)")
 	fs.String("include-mounts", "", "network or FUSE mount points to walk all the same, comma-separated (env FLAWROOK_INCLUDE_MOUNTS)")
 	fs.Bool("read-protected", false, "the unit gives the agent CAP_DAC_READ_SEARCH, to read files no other user may (env FLAWROOK_READ_PROTECTED; install.sh sets it)")
+	fs.String("mode", "", "server (the default) or cluster, which the Helm chart sets (env FLAWROOK_MODE)")
+	fs.String("cluster-name", "", "cluster mode: the name FlawRook shows (env FLAWROOK_CLUSTER_NAME)")
+	fs.String("namespaces-include", "", "cluster mode: only these namespaces, comma-separated (env FLAWROOK_NAMESPACES_INCLUDE)")
+	fs.String("namespaces-exclude", "", "cluster mode: not these namespaces, comma-separated (env FLAWROOK_NAMESPACES_EXCLUDE)")
+	fs.String("sbom-max-image-bytes", "", "cluster mode: the largest image pulled, compressed (env FLAWROOK_SBOM_MAX_IMAGE_BYTES, default 1 GiB)")
+	fs.String("sbom-concurrency", "", "cluster mode: images built at once, 1 to 4 (env FLAWROOK_SBOM_CONCURRENCY)")
 	dryRun := fs.Bool("dry-run", false, "print the exact report, before gzip, and send nothing")
-	interval := fs.Duration("interval", time.Hour, "for testing only: the time between runs")
+	interval := fs.Duration("interval", time.Hour, "for testing only: the time between runs (cluster mode: env FLAWROOK_INTERVAL, 10m to 24h)")
 	showVersion := fs.Bool("version", false, "print the version")
 	reloadPID := fs.String("reload", "", "for the unit's ExecReload= only: send SIGHUP to the running agent, $MAINPID")
 	if err := fs.Parse(os.Args[1:]); err != nil {
@@ -95,6 +105,14 @@ func run() int {
 			flags[key] = f.Value.String()
 		}
 	})
+	intervalGiven := false
+	fs.Visit(func(f *flag.Flag) { intervalGiven = intervalGiven || f.Name == "interval" })
+	if c, err := config.Load(config.Sources{Flags: flags, Env: os.Getenv, Path: *path}); err == nil && c.Cluster() {
+		if !intervalGiven {
+			*interval = c.RunInterval()
+		}
+		return runCluster(c, log, *dryRun, *interval)
+	}
 	if os.Getenv("GOMEMLIMIT") == "" {
 		debug.SetMemoryLimit(memoryLimit)
 	}
@@ -153,3 +171,84 @@ func run() int {
 	}
 	return 0
 }
+
+// runCluster is cluster mode: the chart's Deployment, with a ServiceAccount that may get kube-system and list and
+// watch pods and nodes. SIGHUP isn't used: a config change rolls the pod.
+func runCluster(c config.Config, log *slog.Logger, dryRun bool, interval time.Duration) int {
+	// GOMEMLIMIT: 75 % of the container's memory limit unless set, so the GC works before the cgroup kills.
+	if os.Getenv("GOMEMLIMIT") == "" {
+		if n := cluster.MemoryLimit(cgroupRoot); n > 0 {
+			debug.SetMemoryLimit(n)
+		}
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	api, err := kube.InCluster()
+	if err != nil {
+		log.Error("not started", "error", err)
+		return 1
+	}
+	var ns kube.Namespace
+	if err := api.Get(ctx, "/api/v1/namespaces/kube-system", &ns); err != nil {
+		log.Error("can't read the kube-system namespace, whose UID identifies the cluster: check the chart's ClusterRole", "error", err)
+		return 1
+	}
+	var v kube.Version
+	var clusterVersion *string
+	if err := api.Get(ctx, "/version", &v); err == nil && v.GitVersion != "" {
+		clusterVersion = &v.GitVersion
+	} else if err != nil {
+		log.Warn("the cluster's version can't be read", "error", err)
+	}
+	agentInfo := cluster.Agent{Version: version, OS: runtime.GOOS, Arch: runtime.GOARCH, Mode: cluster.Mode}
+	userAgent := fmt.Sprintf("flawrook-agent/%s (%s; %s)", version, runtime.GOOS, runtime.GOARCH)
+	transport, err := client.Transport(c)
+	if err != nil {
+		log.Error("not started", "error", err)
+		return 1
+	}
+	fl, err := client.New(c, userAgent)
+	if err != nil {
+		log.Error("not started", "error", err)
+		return 1
+	}
+	r := &cluster.Runner{
+		Agent:  agentInfo,
+		Config: c,
+		Client: fl,
+		Source: &cluster.Watcher{API: api, Log: log, Sleep: agent.SleepContext},
+		Images: &cluster.Builder{
+			Registry: &cluster.Registry{Transport: transport, UserAgent: userAgent, Env: os.Getenv, Sleep: agent.SleepContext},
+			TempDir:  os.TempDir(), // the chart's emptyDir
+			Version:  version,
+		},
+		Backoff: agent.DefaultBackoff,
+		Sleep:   agent.SleepContext,
+		Now:     time.Now,
+		Log:     log,
+		Memory:  cluster.CgroupMemory(cgroupRoot),
+	}
+	if err := r.Identify(ns.Metadata.UID, clusterVersion); err != nil {
+		log.Error("not started", "error", err)
+		return 1
+	}
+	if dryRun {
+		pods, nodes, err := cluster.Lists(ctx, api)
+		if err == nil {
+			err = r.DryRun(os.Stdout, pods, nodes)
+		}
+		if err != nil {
+			log.Error("dry run failed", "error", err)
+			return 1
+		}
+		return 0
+	}
+	if err := r.Run(ctx, interval, cluster.FirstDelay()); err != nil {
+		log.Error("not started", "error", err)
+		return 1
+	}
+	return 0
+}
+
+// cgroupRoot is the container's own cgroup v2 directory.
+const cgroupRoot = "/sys/fs/cgroup"

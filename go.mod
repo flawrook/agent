@@ -4,6 +4,7 @@ go 1.27.2
 
 require (
 	github.com/anchore/syft v1.56.0
+	github.com/google/go-containerregistry v0.22.1
 	go.yaml.in/yaml/v3 v3.0.5
 	golang.org/x/net v0.62.0
 	golang.org/x/sys v0.50.0
@@ -144,7 +145,6 @@ require (
 	github.com/gohugoio/hashstructure v0.6.0 // indirect
 	github.com/golang/groupcache v0.0.0-20241129210726-2c02b8208cf8 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
-	github.com/google/go-containerregistry v0.22.1 // indirect
 	github.com/google/go-intervals v0.0.2 // indirect
 	github.com/google/licensecheck v0.3.1 // indirect
 	github.com/google/pprof v0.0.0-20261016150608-1facf8f91b50 // indirect
