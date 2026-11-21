@@ -98,14 +98,19 @@ func Skipped(table []Mount, include []string) []string {
 func Patterns(points []string) []string {
 	out := make([]string, 0, len(points))
 	for _, p := range points {
-		var b strings.Builder
-		for _, r := range strings.TrimPrefix(p, "/") {
-			if strings.ContainsRune(`\*?[]{}`, r) {
-				b.WriteByte('\\')
-			}
-			b.WriteRune(r)
-		}
-		out = append(out, "./"+b.String()+"/**")
+		out = append(out, "./"+Escape(strings.TrimPrefix(p, "/"))+"/**")
 	}
 	return out
+}
+
+// Escape quotes the glob's special characters in a path, so an exclusion matches that path only.
+func Escape(path string) string {
+	var b strings.Builder
+	for _, r := range path {
+		if strings.ContainsRune(`\*?[]{}`, r) {
+			b.WriteByte('\\')
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }

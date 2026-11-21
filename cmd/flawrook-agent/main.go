@@ -108,7 +108,8 @@ func run() int {
 				skippedMounts = list
 				log.Info("network and FUSE mounts not walked (include_mounts walks one)", "mounts", list)
 			}
-			sbom, stats, err := inventory.Build(ctx, "/", version, mounts.Patterns(skip))
+			// Only what the catalogers read is walked (inventory.Narrow), less the skipped mounts.
+			sbom, stats, err := inventory.Build(ctx, "/", version, append(mounts.Patterns(skip), inventory.Narrow("/", cfg.IncludeMounts)...))
 			if err == nil {
 				log.Info("inventory built", "packages", stats.Packages, "ms", stats.Elapsed.Milliseconds(), "maxRssKiB", stats.MaxRSSKiB)
 			}

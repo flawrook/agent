@@ -18,6 +18,10 @@
 # FLAWROOK_CA_FILE. Each container runs the agent with --interval 20s for RUN_SECONDS, so it sends a
 # report and then heartbeats; the stub answers the first heartbeat it gets with 409, so one host also
 # shows a heartbeat turning into a full report. A --dry-run per image is kept beside the logs.
+# The file-heavy host (0.2.0, the review's memory finding): debian:13 with about 310,000 files of application
+# trees, generated in the container first (test/heavy-tree.sh), then the agent under the unit's caps:
+# --memory 256m and GOMEMLIMIT=96MiB. It must report and heartbeat like the others, and its peak RSS stay
+# under the cap. HEAVY=0 leaves it out.
 # Usage: test/integration.sh [out-dir]
 # PREBUILT=1 uses dist/flawrook-agent-linux-<arch> and dist/stub-linux-<arch> as they are, without building.
 # Against a real API instead of the stub: export FLAWROOK_URL and FLAWROOK_TOKEN (the token passes to the
@@ -47,6 +51,7 @@ names=""
 cleanup() {
   for n in $names; do docker stop -t 2 "$NET-$n" "$NET-$n-fwd" >/dev/null 2>&1 || true; done
   docker stop -t 2 "$NET-stub" >/dev/null 2>&1 || true
+  docker rm -f "$NET-heavy" >/dev/null 2>&1 || true
   docker network rm "$NET" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
@@ -72,6 +77,23 @@ if [ -n "$STUB" ]; then
   caopts="-v $CA:/etc/flawrook/ca.pem:ro -e FLAWROOK_CA_FILE=/etc/flawrook/ca.pem"
 fi
 
+HEAVY_CAP_KIB=262144 # the unit's MemoryMax=256M
+if [ "${HEAVY:-1}" = 1 ]; then
+  names="$names heavy"
+  docker image inspect debian:13 >/dev/null 2>&1 || docker pull -q debian:13 >/dev/null
+  docker image inspect debian:13 --format "debian:13 {{index .RepoDigests 0}} (heavy)" >>"$OUT/images.txt"
+  # shellcheck disable=SC2086 # caopts is several words, or none
+  # Not --rm: if it stops, its exit status, OOM flag and log say why (cleanup removes it).
+  docker run -d --name "$NET-heavy" --network "$NET" --hostname it-heavy --memory 256m --memory-swap 256m \
+    -e GOMEMLIMIT=96MiB -v "$AGENT:/usr/bin/flawrook-agent:ro" -v "$PWD/test/heavy-tree.sh:/heavy-tree.sh:ro" \
+    -e FLAWROOK_URL -e FLAWROOK_TOKEN $caopts debian:13 \
+    sh -c 'sh /heavy-tree.sh >/heavy-tree.txt && /usr/bin/flawrook-agent --dry-run >/heavy.dry-run.json 2>/heavy.dry-run.log && touch /ready && exec /usr/bin/flawrook-agent --interval 20s' >/dev/null
+  if [ -n "$forward" ]; then
+    docker run -d --rm --name "$NET-heavy-fwd" --network "container:$NET-heavy" --memory 64m -v "$PWD/dist/stub-linux-$ARCH:/stub:ro" \
+      alpine:3.20 /stub -forward "127.0.0.1:$forward=host.docker.internal:$forward" >/dev/null
+  fi
+fi
+
 for image in $IMAGES; do
   name=$(echo "$image" | tr ':./' '---')
   names="$names $name"
@@ -85,10 +107,24 @@ for image in $IMAGES; do
       alpine:3.20 /stub -forward "127.0.0.1:$forward=host.docker.internal:$forward" >/dev/null
   fi
 done
+if [ "${HEAVY:-1}" = 1 ]; then # the trees and the capped --dry-run first, then the same run as the others
+  i=0
+  until docker exec "$NET-heavy" test -e /ready 2>/dev/null; do
+    i=$((i + 1))
+    if [ $i -ge 600 ] || [ "$(docker inspect -f '{{.State.Running}}' "$NET-heavy" 2>/dev/null)" != true ]; then
+      echo "heavy: no capped --dry-run: $(docker inspect -f 'exit {{.State.ExitCode}}, OOM-killed {{.State.OOMKilled}}' "$NET-heavy" 2>&1)"
+      docker logs "$NET-heavy" 2>&1 | tail -5
+      break
+    fi
+    sleep 1
+  done
+  for f in heavy-tree.txt heavy.dry-run.json heavy.dry-run.log; do docker cp "$NET-heavy:/$f" "$OUT/$f" >/dev/null 2>&1 || true; done
+fi
 sleep "$RUN_SECONDS"
 for name in $names; do
-  docker logs "$NET-$name" >"$OUT/$name.log" 2>&1
-  docker stop -t 5 "$NET-$name" >/dev/null
+  # A host killed at its cap is gone (--rm): its missing reports fail it below, not the script here.
+  docker logs "$NET-$name" >"$OUT/$name.log" 2>&1 || true
+  docker stop -t 5 "$NET-$name" >/dev/null 2>&1 || true
   [ -z "$forward" ] || docker stop -t 2 "$NET-$name-fwd" >/dev/null 2>&1 || true
 done
 
@@ -106,4 +142,9 @@ for name in $names; do
   echo "$name: reports=$reports heartbeats=$heartbeats $rss"
   [ "$reports" -ge 1 ] && [ "$heartbeats" -ge 1 ] || fail=1
 done
+if [ "${HEAVY:-1}" = 1 ]; then
+  peak=$(cat "$OUT/heavy.dry-run.log" "$OUT/heavy.log" 2>/dev/null | grep -o 'maxRssKiB=[0-9]*' | cut -d= -f2 | sort -n | tail -1)
+  echo "heavy: $(head -1 "$OUT/heavy-tree.txt" 2>/dev/null || echo '?') files; peak maxRssKiB=${peak:-none}, cap $HEAVY_CAP_KIB"
+  [ -n "$peak" ] && [ "$peak" -lt "$HEAVY_CAP_KIB" ] || fail=1
+fi
 exit $fail
