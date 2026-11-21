@@ -1,7 +1,9 @@
 # FlawRook agent
 
 The FlawRook agent lists a Linux server's OS packages and runtimes, and sends the list to
-FlawRook. FlawRook matches it against vulnerability data. The agent runs as a systemd service.
+FlawRook. FlawRook matches it against vulnerability data, by source package and with your distribution's
+backported fixes: see [How FlawRook matches OS packages](https://flawrook.dev/docs/os-packages). The agent runs
+as a systemd service.
 
 ## What it does on your host
 
