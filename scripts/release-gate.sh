@@ -22,6 +22,7 @@
 # step, and the gate stops when it fails or takes more than 1 s. It is also watched every 30 s for the whole
 # run: a failure or more than 1 s stops the gate's own containers (never another's), goes into health.log,
 # and marks the running step STOPPED; the watch goes on. GATE_STEPS="vet test …" runs only those steps.
+# release.sh puts packaging/cosign.pub into install.sh, or COSIGN_PUB's key; it signs nothing (release-sign.yml does).
 set -u
 VERSION=${1:?usage: scripts/release-gate.sh <version>}
 cd "$(dirname "$0")/.." || exit 1
@@ -72,6 +73,7 @@ note() {
     gofmt) echo "$(grep -vc '^$' "$log") files unformatted" ;;
     licences) tail -1 "$log" ;;
     artifacts) grep -cE '^[0-9a-f]{64}  ' "$OUT/checksums.txt" | sed 's/$/ files checksummed/' ;;
+    signature) tail -1 "$log" ;;
     unit-caps) grep -c '^--- PASS' "$log" | sed 's/$/ unit test passed; the built unit equals packaging\/flawrook-agent.service/' ;;
     install-test) echo "$(grep -c '  ok ' "$log") ok, $(grep -c 'FAIL' "$log") failed; $(grep -o 'exposure level[^:]*: [0-9.]* [A-Z]*' "$log")" ;;
     integration) grep -E '^[a-z0-9-]+: reports=' "$log" | sed -E 's/ maxRssKiB.*//' | tr '\n' ';' ;;
@@ -105,6 +107,29 @@ built_unit_is_packaged() {
   scripts/docker-go.sh test -count=1 -run TestTheSystemdUnit -v ./packaging/ && cmp dist/release/flawrook-agent.service packaging/flawrook-agent.service
 }
 # shellcheck disable=SC2317
+signature() { # release.sh signs nothing: install.sh carries the release key, and the workflow that signs is pinned
+  sed -n '/^-----BEGIN PUBLIC KEY-----$/,/^-----END PUBLIC KEY-----$/p' dist/release/install.sh >"$OUT/install.pub"
+  cmp "$OUT/install.pub" "${COSIGN_PUB:-packaging/cosign.pub}" || { echo "install.sh carries another key"; return 1; }
+  [ ! -e dist/release/checksums.txt.sig ] || { echo "release.sh made a signature: signing is release-sign.yml's"; return 1; }
+  wf=.github/workflows/release-sign.yml
+  # Every action pinned to a full commit SHA, its version beside it; cosign's own version set.
+  uses=$(grep -cE '^ *- uses: ' "$wf")
+  pinned=$(grep -cE '^ *- uses: [^@ ]+@[0-9a-f]{40} # v[0-9]+\.[0-9]+\.[0-9]+$' "$wf")
+  if [ "$uses" = 0 ] || [ "$uses" != "$pinned" ]; then echo "$wf: $pinned of $uses actions pinned to a commit SHA"; return 1; fi
+  grep -q '^ *- uses: sigstore/cosign-installer@' "$wf" || { echo "$wf doesn't install cosign with sigstore/cosign-installer"; return 1; }
+  cosign=$(sed -nE 's/^ *cosign-release: (v[0-9]+\.[0-9]+\.[0-9]+)( .*)?$/\1/p' "$wf")
+  [ -n "$cosign" ] || { echo "$wf doesn't set cosign's version"; return 1; }
+  # The least it needs: no permission at the top, contents: write for its one job, the two cosign secrets only.
+  secrets=$(grep -oE 'secrets\.[A-Za-z_]+' "$wf" | sort -u | tr '\n' ' ')
+  [ "$secrets" = "secrets.COSIGN_PASSWORD secrets.COSIGN_PRIVATE_KEY " ] || { echo "$wf uses the secrets: $secrets"; return 1; }
+  grep -q '^permissions: {}$' "$wf" || { echo "$wf grants permissions at the top"; return 1; }
+  if [ "$(grep -cE '^ +[a-z-]+: (read|write)( |$)' "$wf")" != 1 ] || ! grep -qE '^ +contents: write( |$)' "$wf"; then
+    echo "$wf: its job's permissions aren't contents: write alone"
+    return 1
+  fi
+  echo "install.sh carries the release key; $wf: $pinned actions pinned by SHA, cosign $cosign, contents: write only, the two cosign secrets only"
+}
+# shellcheck disable=SC2317
 artifacts() {
   cp dist/release/checksums.txt "$OUT/checksums.txt"
   ls -l dist/release
@@ -121,6 +146,7 @@ step licences      0 scripts/licences.sh --check
 step release       1 scripts/release.sh "$VERSION"
 step unit-caps     0 built_unit_is_packaged
 step artifacts     0 artifacts
+step signature     0 signature
 step install-test  1 test/install-test.sh "$OUT/install-test"
 step integration   1 test/integration.sh "$OUT/integration"
 step network-proof 1 test/network-proof.sh "$OUT/network-proof"

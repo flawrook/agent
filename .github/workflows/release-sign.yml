@@ -1,0 +1,37 @@
+# Signs a release: when a prerelease is published, checksums.txt gets its cosign signature, checksums.txt.sig,
+# and only then is the release made the latest, which is what install.sh's releases/latest address reads. So no
+# unsigned release is ever the one installed by default. The private key and its password are the repository
+# secrets COSIGN_PRIVATE_KEY and COSIGN_PASSWORD; the signature is checked against packaging/cosign.pub, the key
+# every install.sh carries, before it is uploaded. It goes into no transparency log: install.sh and the README's
+# command check it against the key alone.
+name: Sign the release
+on:
+  release:
+    types: [published]
+permissions: {}
+jobs:
+  sign:
+    if: github.event.release.prerelease
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write # the release's new asset, and the edit that makes it the latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+        with:
+          cosign-release: v2.6.0 # its detached signature verifies with cosign 2 and 3 alike
+      - name: Sign checksums.txt, check the signature, attach it, make the release the latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+        run: |
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern checksums.txt --pattern install.sh --dir release
+          sed -n '/^-----BEGIN PUBLIC KEY-----$/,/^-----END PUBLIC KEY-----$/p' release/install.sh | cmp - packaging/cosign.pub
+          cosign sign-blob --yes --key env://COSIGN_PRIVATE_KEY --tlog-upload=false --output-signature release/checksums.txt.sig release/checksums.txt
+          cosign verify-blob --key packaging/cosign.pub --signature release/checksums.txt.sig --insecure-ignore-tlog=true release/checksums.txt
+          gh release upload "$TAG" release/checksums.txt.sig --repo "$GITHUB_REPOSITORY"
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --prerelease=false --latest

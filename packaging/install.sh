@@ -26,6 +26,9 @@
 # service starts only once a token is set. FLAWROOK_RELEASE_URL points at another copy of the release (a mirror,
 # a test). FLAWROOK_READ_PROTECTED=1 lets the service read files no other user may (CAP_DAC_READ_SEARCH, in a
 # systemd drop-in, and read_protected: true in agent.yaml); FLAWROOK_READ_PROTECTED=0 takes it away again.
+# checksums.txt is signed with the release's key, below: with cosign 2 or newer installed, its signature is
+# checked before any checksum in it is trusted. Without cosign the sha256 sums alone check the downloads, unless
+# FLAWROOK_REQUIRE_SIGNATURE=1, which then stops here.
 set -eu
 
 VERSION=@VERSION@
@@ -37,9 +40,27 @@ fail() {
   exit 1
 }
 
-# Signing comes with the first public release: verify checksums.txt's signature here (cosign
-# verify-blob) before any checksum in it is trusted.
-verify_signature() { :; }
+# The release's cosign public key (ECDSA P-256), written in by scripts/render-install.sh.
+COSIGN_PUB=$(
+  cat <<'KEY'
+@COSIGN_PUB@
+KEY
+)
+
+# verify_signature checks checksums.txt against checksums.txt.sig with the key above, where cosign is installed.
+# The signature isn't in a transparency log, so cosign checks it against the key alone (--insecure-ignore-tlog).
+verify_signature() {
+  if ! command -v cosign >/dev/null 2>&1; then
+    [ "${FLAWROOK_REQUIRE_SIGNATURE:-}" != 1 ] || fail "FLAWROOK_REQUIRE_SIGNATURE=1, but cosign isn't installed"
+    echo "cosign isn't installed: the downloads are checked against checksums.txt's sha256 sums, but its signature isn't."
+    return 0
+  fi
+  fetch "$release/checksums.txt.sig" "$tmp/checksums.txt.sig" || fail "the release has no checksums.txt.sig"
+  printf '%s\n' "$COSIGN_PUB" >"$tmp/cosign.pub"
+  cosign verify-blob --key "$tmp/cosign.pub" --signature "$tmp/checksums.txt.sig" --insecure-ignore-tlog=true "$1" >/dev/null 2>&1 ||
+    fail "checksums.txt's signature doesn't verify with the release key: not installing"
+  echo "checksums.txt: signature verified (cosign)"
+}
 
 fetch() {
   if command -v curl >/dev/null 2>&1; then

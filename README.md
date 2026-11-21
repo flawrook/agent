@@ -78,7 +78,18 @@ Or in two steps, which keeps the token out of your shell history:
 1. Write `url` and `token` to `/etc/flawrook/agent.yaml`.
 2. Run `install.sh` without `FLAWROOK_TOKEN`. It gives `/etc/flawrook` and its files to root and the `flawrook` group (0750, 0640).
 
-`install.sh` checks every file it downloads against the release's `checksums.txt`. It writes the token only to `agent.yaml`, never into the service unit. It starts the service only once a token is set.
+`install.sh` writes the token only to `agent.yaml`, never into the service unit. It starts the service only once a token is set.
+
+**Checksums and signature.**
+- `install.sh` checks every file it downloads against the release's `checksums.txt`.
+- That file is signed with the release's cosign key. `install.sh` carries the public key, and this repository keeps it as `packaging/cosign.pub`. The private key never leaves GitHub: when a release is published, `.github/workflows/release-sign.yml` signs `checksums.txt` with it (cosign 2.6.0), attaches `checksums.txt.sig`, and only then makes the release the latest one, which the install line above downloads.
+- Where cosign 2 or newer is installed, `install.sh` checks the signature before it trusts any checksum, and stops if it is wrong or missing.
+- Without cosign it says so and relies on the checksums alone. Set `FLAWROOK_REQUIRE_SIGNATURE=1` to make it stop instead.
+- To check a release by hand, with `cosign.pub` from this repository and `checksums.txt` and `checksums.txt.sig` from the release:
+
+      cosign verify-blob --key cosign.pub --signature checksums.txt.sig --insecure-ignore-tlog=true checksums.txt
+
+  It prints `Verified OK`. The signature isn't in a public transparency log, so cosign checks it against the key alone; `--insecure-ignore-tlog=true` says so, and cosign warns about it.
 
 It needs systemd 235 or newer: Debian 10, Ubuntu 18.04, RHEL, Rocky Linux and AlmaLinux 8, or later. An older systemd ignores `DynamicUser`, and the agent would run as root. So on an older systemd, or one whose version it can't read, `install.sh` stops before it installs anything. The deb or rpm installed by itself puts its files in place, but neither enables nor starts the service, and says why. If an older systemd starts it all the same (a unit enabled by hand), the agent sees it runs as root under systemd, logs why and stops with exit status 78, which the unit doesn't restart. A root shell that inherits systemd's `INVOCATION_ID` (`systemd-run --shell`, or `su` without `-` inside a systemd user unit) is refused the same way: run the agent there with `env -u INVOCATION_ID flawrook-agent`. Alpine and other systems without systemd have no such floor.
 
