@@ -23,12 +23,14 @@ Nice=19
 IOSchedulingClass=best-effort
 IOSchedulingPriority=7
 
-# A user of its own that can read every file (CAP_DAC_READ_SEARCH: the package databases, the runtimes'
-# binaries, /etc/flawrook/agent.yaml) and do nothing else.
+# A user of its own, with no capabilities: the package databases and the runtimes' binaries are
+# world-readable. install.sh's FLAWROOK_READ_PROTECTED=1 adds CAP_DAC_READ_SEARCH in a drop-in, to read files
+# no other user may (read_protected in agent.yaml).
 DynamicUser=yes
-AmbientCapabilities=CAP_DAC_READ_SEARCH
-CapabilityBoundingSet=CAP_DAC_READ_SEARCH
+CapabilityBoundingSet=
 NoNewPrivileges=yes
+# Its config, /etc/flawrook (agent.yaml, a CA file), is root's and the flawrook group's (0750 and 0640).
+SupplementaryGroups=flawrook
 # Before 232 systemd ignores DynamicUser=, and the agent would run as root. FLAWROOK_SERVICE, which every
 # systemd passes on, tells the agent its unit started it: as root it refuses, with exit status 78 (EX_CONFIG),
 # and the refusal isn't restarted.

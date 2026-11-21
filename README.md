@@ -14,10 +14,11 @@ FlawRook. FlawRook matches it against vulnerability data. The agent runs as a sy
   - `/etc/machine-id`, only to derive a one-way host ID;
   - the mount table, to skip network mounts;
   - its settings in `/etc/flawrook/agent.yaml`;
-  - the runtime binaries it identifies by their version strings (Node.js, Python, PHP, nginx, Redis and the like).
-- It writes nothing outside `/var/lib/flawrook`. That directory gets one file, `host-id`, and only on a host without a machine ID.
-- It doesn't walk `/proc`, `/sys`, `/dev`, `/run`, `/tmp`, container storage, or network and FUSE mounts (NFS, SMB, sshfs), unless `include_mounts` names them.
-- The service runs as a user of its own (systemd `DynamicUser`) with one capability, `CAP_DAC_READ_SEARCH`, which lets it read any file and grants nothing else. It can't write elsewhere: `ProtectSystem=strict` and `ProtectHome=read-only`.
+  - the runtime binaries it identifies by their version strings (Node.js, Python, PHP, nginx, Redis and the like), in `/usr/bin`, `/usr/sbin`, `/usr/lib`, `/usr/local/bin`, `/usr/local/sbin`, `/usr/local/lib`, `/usr/local/go` and `/opt`, and in `/bin`, `/sbin` and `/lib` where they aren't links into `/usr`.
+- It writes nothing outside `/var/lib/flawrook`. That directory gets one file, `host-id`, and only on a host without a machine ID. Without systemd, an agent run as a non-root user on such a host (a bare Alpine, say) needs that directory made writable for it; under systemd the unit provides it.
+- It walks only those places, and `/etc` and the package databases, leaving out the application trees in them: `node_modules`, `.git`, Python's `site-packages`, `dist-packages` and `__pycache__`. It doesn't walk home directories, `/root`, `/srv`, `/var/www`, `/usr/src`, container storage, or network and FUSE mounts (NFS, SMB, sshfs), unless `include_mounts` names them.
+- The service runs as a user of its own (systemd `DynamicUser`) with no capabilities: the package databases and the runtimes' binaries are readable by every user. It can't write elsewhere: `ProtectSystem=strict` and `ProtectHome=read-only`.
+- It reads its settings through the `flawrook` group, a system group that root and the service alone share. `/etc/flawrook` is 0750 and its files 0640, root:flawrook, so only root and the service read the token; any other user gets "Permission denied". The packages and `install.sh` create the group, and set those modes on every install and upgrade. The group stays when the agent is removed, as most packages leave theirs.
 
 **Memory.**
 - Go's heap is held to 96 MiB (`GOMEMLIMIT`), and the whole process is capped at 256 MB (`MemoryMax=256M`).
@@ -72,8 +73,8 @@ One line, with the address and token from FlawRook (Integrations, Agents):
     curl -fsSL https://github.com/flawrook/agent/releases/latest/download/install.sh | sudo env FLAWROOK_URL=<your FlawRook address> FLAWROOK_TOKEN=flra_… sh
 
 Or in two steps, which keeps the token out of your shell history:
-1. Write `url` and `token` to `/etc/flawrook/agent.yaml` (mode 0600).
-2. Run `install.sh` without `FLAWROOK_TOKEN`.
+1. Write `url` and `token` to `/etc/flawrook/agent.yaml`.
+2. Run `install.sh` without `FLAWROOK_TOKEN`. It gives `/etc/flawrook` and its files to root and the `flawrook` group (0750, 0640).
 
 `install.sh` checks every file it downloads against the release's `checksums.txt`. It writes the token only to `agent.yaml`, never into the service unit. It starts the service only once a token is set.
 

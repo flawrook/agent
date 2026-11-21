@@ -54,11 +54,11 @@ func TestTheSystemdUnit(t *testing.T) {
 		"Nice=19",
 		"IOSchedulingClass=best-effort",
 		"IOSchedulingPriority=7",
-		// Its own user, one capability.
+		// Its own user, no capabilities (0.2.0: read_protected's drop-in adds the one), its config through the group.
 		"DynamicUser=yes",
-		"AmbientCapabilities=CAP_DAC_READ_SEARCH",
-		"CapabilityBoundingSet=CAP_DAC_READ_SEARCH",
+		"CapabilityBoundingSet=",
 		"NoNewPrivileges=yes",
+		"SupplementaryGroups=flawrook",
 		// Where a systemd before 232 ignored DynamicUser=: the agent knows its unit started it, refuses root,
 		// and the refusal isn't restarted.
 		"Environment=FLAWROOK_SERVICE=1",
@@ -97,6 +97,9 @@ func TestTheSystemdUnit(t *testing.T) {
 	if want := "RestartPreventExitStatus=" + strconv.Itoa(sandbox.ExitCode); !lines[want] {
 		t.Errorf("the unit lacks %q, the agent's exit status when it refuses root", want)
 	}
+	if strings.Contains(unit, "\nAmbientCapabilities=") || strings.Contains(unit, "CAP_DAC_READ_SEARCH\n") {
+		t.Error("the unit grants a capability: it ships with none, and FLAWROOK_READ_PROTECTED=1's drop-in adds CAP_DAC_READ_SEARCH")
+	}
 	for _, never := range []string{"/bin/kill", "flra_", "FLAWROOK_TOKEN", "FLAWROOK_URL"} {
 		if strings.Contains(unit, never) {
 			t.Errorf("the unit has %q: no external kill, and the token and URL live in agent.yaml only", never)
@@ -108,12 +111,14 @@ func TestTheSystemdUnit(t *testing.T) {
 	}
 }
 
-// The packages: agent.yaml is the admin's (0600, kept on upgrade) in a 0700 directory.
+// The packages: agent.yaml is the admin's (kept on upgrade), readable by root and the flawrook group only, in a
+// directory only they enter; the group exists before the files (preinstall).
 func TestThePackagesConfig(t *testing.T) {
 	nfpm := read(t, "nfpm.yaml")
 	for _, want := range []string{
-		"  - dst: /etc/flawrook\n    type: dir\n    file_info:\n      mode: 0700\n",
-		"    dst: /etc/flawrook/agent.yaml\n    type: config|noreplace\n    file_info:\n      mode: 0600\n",
+		"  - dst: /etc/flawrook\n    type: dir\n    file_info:\n      mode: 0750\n      group: flawrook",
+		"    dst: /etc/flawrook/agent.yaml\n    type: config|noreplace\n    file_info:\n      mode: 0640\n      group: flawrook\n",
+		"  preinstall: packaging/preinstall.sh\n",
 		"    dst: /usr/lib/systemd/system/flawrook-agent.service\n",
 	} {
 		if !strings.Contains(nfpm, want) {

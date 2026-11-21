@@ -15,6 +15,12 @@
 
 # deb and rpm: enable the service; start it (or restart it after an upgrade) only once a token is set.
 set -e
+# The config is root's and the flawrook group's to read (0.2.0). Before, it was root's alone (0700 and 0600),
+# and an unchanged agent.yaml may come back with the package's modes: set them on every install and upgrade.
+chgrp flawrook /etc/flawrook && chmod 0750 /etc/flawrook
+for f in /etc/flawrook/*; do
+  if [ -f "$f" ] && [ ! -L "$f" ]; then chgrp flawrook "$f" && chmod 0640 "$f"; fi
+done
 command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ] || exit 0
 # The agent's sandbox needs systemd 235 or newer: before 232 systemd ignores DynamicUser=, and the agent would run
 # as root. With an older version, or one this can't read, the files stay installed and the service stays off.

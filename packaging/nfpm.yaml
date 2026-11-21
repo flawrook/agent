@@ -37,12 +37,14 @@ contents:
   - dst: /etc/flawrook
     type: dir
     file_info:
-      mode: 0700
+      mode: 0750
+      group: flawrook # created by preinstall: the service reads its config as a member, with no capability
   - src: packaging/agent.yaml
     dst: /etc/flawrook/agent.yaml
     type: config|noreplace
     file_info:
-      mode: 0600
+      mode: 0640
+      group: flawrook
   - src: LICENSE
     dst: /usr/share/doc/flawrook-agent/LICENSE
   - src: NOTICE
@@ -51,6 +53,7 @@ contents:
     dst: /usr/share/doc/flawrook-agent/third_party/licenses
     type: tree
 scripts:
+  preinstall: packaging/preinstall.sh
   postinstall: packaging/postinstall.sh
   preremove: packaging/preremove.sh
   postremove: packaging/postremove.sh

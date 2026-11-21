@@ -16,7 +16,8 @@
 # Installs the FlawRook agent. In one line:
 #   curl -fsSL https://github.com/flawrook/agent/releases/latest/download/install.sh | sudo env FLAWROOK_URL=<origin> FLAWROOK_TOKEN=flra_… sh
 # Or in two steps, which keeps the token out of shell history: write url and token to
-# /etc/flawrook/agent.yaml (mode 0600) yourself, then run this script without FLAWROOK_TOKEN.
+# /etc/flawrook/agent.yaml yourself, then run this script without FLAWROOK_TOKEN. It gives /etc/flawrook and
+# its files to root and the flawrook group (0750, 0640), which the service reads them through.
 #
 # It installs this release's deb (Debian, Ubuntu), rpm (Red Hat, Rocky Linux, AlmaLinux) or plain binary,
 # each checked against the release's checksums.txt before it is used. Where systemd is installed, it needs
@@ -61,6 +62,23 @@ get() {
   [ "$got" = "$want" ] || fail "$1: sha256 $got, but checksums.txt says $want"
 }
 
+# The flawrook group reads the config with root: the service is a member (SupplementaryGroups=flawrook) and needs
+# no capability for it. Like most packages' groups, it stays when the agent is removed.
+ensure_group() {
+  grep -q '^flawrook:' /etc/group && return 0
+  if command -v groupadd >/dev/null 2>&1; then groupadd --system flawrook; else addgroup -S flawrook; fi
+}
+
+# set_modes gives /etc/flawrook and the files in it to root and the flawrook group (0750, 0640), after every
+# write, so none leaves the service unable to read its config.
+set_modes() {
+  [ -d /etc/flawrook ] || return 0
+  chgrp flawrook /etc/flawrook && chmod 0750 /etc/flawrook
+  for f in /etc/flawrook/*; do
+    if [ -f "$f" ] && [ ! -L "$f" ]; then chgrp flawrook "$f" && chmod 0640 "$f"; fi
+  done
+}
+
 # write_config puts the given url and token into agent.yaml (0600), keeps its other keys, and keeps the
 # previous file as agent.yaml.bak.
 write_config() {
@@ -77,7 +95,9 @@ write_config() {
   [ -z "$url" ] || echo "url: $url" >>"$new"
   [ -z "$token" ] || echo "token: $token" >>"$new"
   chmod 0600 "$new"
+  chgrp flawrook "$new" && chmod 0640 "$new"
   mv "$new" "$CONFIG"
+  set_modes
 }
 
 has_token() { grep -Eq '^token:[[:space:]]*[^[:space:]#]' "$CONFIG" 2>/dev/null; }
@@ -118,7 +138,8 @@ main() {
   fetch "$release/checksums.txt" "$tmp/checksums.txt"
   verify_signature "$tmp/checksums.txt"
 
-  # The config first: a package's postinstall starts the service when it finds a token.
+  # The group and the config first: a package's postinstall starts the service when it finds a token.
+  ensure_group
   write_config
   run_before=$(run_id) pkg=
 
@@ -141,8 +162,9 @@ main() {
       get flawrook-agent.service
       sed "s#/usr/bin/flawrook-agent#$bin#" "$tmp/flawrook-agent.service" >/etc/systemd/system/flawrook-agent.service
     fi
-    [ -f "$CONFIG" ] || { install -d -m 0700 /etc/flawrook && install -m 0600 /dev/null "$CONFIG"; }
+    [ -f "$CONFIG" ] || { install -d -m 0750 /etc/flawrook && install -m 0640 /dev/null "$CONFIG"; }
   fi
+  set_modes # 0.1.0 left /etc/flawrook root's alone (0700, 0600)
   echo "flawrook-agent $VERSION installed: $bin"
 
   if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
@@ -159,8 +181,8 @@ main() {
       echo "Next: write url and token to $CONFIG (mode 0600), then run: systemctl start flawrook-agent"
     fi
   else
-    echo "No systemd here: run $bin from your init system, as root or with CAP_DAC_READ_SEARCH."
-    has_token || echo "It reads url and token from $CONFIG (mode 0600)."
+    echo "No systemd here: run $bin from your init system, as root or as a user in the flawrook group."
+    has_token || echo "It reads url and token from $CONFIG (root and the flawrook group, mode 0640)."
   fi
 }
 

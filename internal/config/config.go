@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/url"
 	"os"
@@ -136,6 +137,9 @@ func readFile(path string) (file, error) {
 	raw, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return f, nil
+	}
+	if errors.Is(err, fs.ErrPermission) {
+		return f, fmt.Errorf("config %s: %w. The service reads it as a member of the flawrook group: agent.yaml needs mode 0640 root:flawrook and /etc/flawrook 0750 root:flawrook, as install.sh sets them", path, err)
 	}
 	if err != nil {
 		return f, fmt.Errorf("config %s: %w", path, err)
