@@ -1,0 +1,66 @@
+[Unit]
+Description=FlawRook agent: reports this server's OS packages and runtimes to FlawRook
+Documentation=https://github.com/flawrook/agent
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/flawrook-agent
+# A shell's own kill: a minimal system (Debian without procps) has no kill program. $$ is a literal $.
+ExecReload=/bin/sh -c 'kill -HUP $$MAINPID'
+Restart=on-failure
+RestartSec=60
+
+# Go's soft heap limit, and the hard cap for the whole process.
+Environment=GOMEMLIMIT=96MiB
+MemoryMax=256M
+
+# The scan yields to everything else: the lowest CPU priority, and IO best-effort at its lowest level.
+# Not the idle IO class: on a disk that is never idle it would starve the scan forever. Best-effort 7
+# always gets its turn, last. (IO priorities apply where the disk's scheduler honours them: BFQ, mq-deadline.)
+Nice=19
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+
+# A user of its own that can read every file (CAP_DAC_READ_SEARCH: the package databases, the runtimes'
+# binaries, /etc/flawrook/agent.yaml) and do nothing else.
+DynamicUser=yes
+AmbientCapabilities=CAP_DAC_READ_SEARCH
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH
+NoNewPrivileges=yes
+# Before 232 systemd ignores DynamicUser=, and the agent would run as root. FLAWROOK_SERVICE, which every
+# systemd passes on, tells the agent its unit started it: as root it refuses, with exit status 78 (EX_CONFIG),
+# and the refusal isn't restarted.
+Environment=FLAWROOK_SERVICE=1
+RestartPreventExitStatus=78
+
+# Read-only everywhere but /var/lib/flawrook, which keeps the generated host id when there's no machine id.
+StateDirectory=flawrook
+StateDirectoryMode=0700
+UMask=0077
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+
+# Outbound only: HTTPS over IPv4 or IPv6, Unix sockets for the resolver, and no port ever bound.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SocketBindDeny=any
+
+[Install]
+WantedBy=multi-user.target

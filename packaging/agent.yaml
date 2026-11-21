@@ -1,0 +1,14 @@
+# FlawRook agent settings. A flag wins over the environment, which wins over this file.
+# Set your FlawRook address and the agent token (Integrations, Agents), then:
+#   sudo systemctl start flawrook-agent
+#
+# url: https://flawrook.dev
+# token: flra_...
+#
+# Optional:
+# hostname: web-1                    # reported instead of the real hostname
+# ca_file: /etc/flawrook/ca.pem      # a PEM bundle trusted besides the system's
+# https_proxy: http://proxy:3128
+# no_proxy: internal.example.com
+# include_mounts:                   # network (NFS, SMB) and FUSE mounts aren't walked; list any to walk
+#   - /srv/data

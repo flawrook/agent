@@ -1,0 +1,56 @@
+# Copyright 2026 Binerals Ltd
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# deb and rpm for one architecture; scripts/release.sh sets VERSION, GOARCH and MAINTAINER.
+name: flawrook-agent
+arch: ${GOARCH}
+platform: linux
+version: ${VERSION}
+section: admin
+priority: optional
+maintainer: ${MAINTAINER}
+description: |
+  FlawRook agent: reports this server's OS packages and runtimes to FlawRook every hour.
+  Outbound HTTPS only, no port opened, no remote commands, read-only everywhere.
+homepage: https://github.com/flawrook/agent
+license: Apache-2.0
+contents:
+  - src: dist/pkg/flawrook-agent # the GOARCH binary, staged by scripts/release.sh
+    dst: /usr/bin/flawrook-agent
+    file_info:
+      mode: 0755
+  - src: packaging/flawrook-agent.service
+    dst: /usr/lib/systemd/system/flawrook-agent.service
+    file_info:
+      mode: 0644
+  - dst: /etc/flawrook
+    type: dir
+    file_info:
+      mode: 0700
+  - src: packaging/agent.yaml
+    dst: /etc/flawrook/agent.yaml
+    type: config|noreplace
+    file_info:
+      mode: 0600
+  - src: LICENSE
+    dst: /usr/share/doc/flawrook-agent/LICENSE
+  - src: NOTICE
+    dst: /usr/share/doc/flawrook-agent/NOTICE
+  - src: third_party/licenses
+    dst: /usr/share/doc/flawrook-agent/third_party/licenses
+    type: tree
+scripts:
+  postinstall: packaging/postinstall.sh
+  preremove: packaging/preremove.sh
+  postremove: packaging/postremove.sh

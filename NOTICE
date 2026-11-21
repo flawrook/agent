@@ -1,0 +1,134 @@
+FlawRook agent
+Copyright 2026 Binerals Ltd
+
+Licensed under the Apache License, Version 2.0 (LICENSE).
+
+The agent is built with Syft (github.com/anchore/syft) and other Go modules, each under its own licence.
+The licence files of every module compiled into the binary, and of the Go runtime, are in
+third_party/licenses, by module path (in the packages, /usr/share/doc/flawrook-agent/third_party/licenses);
+scripts/licences.sh refreshes them, and a release checks they are complete.
+
+Modules under the Mozilla Public License 2.0, compiled into the binary unmodified. Their source code is
+available at these module paths and versions (for example through https://proxy.golang.org):
+  github.com/anchore/go-version v1.2.2-0.20200701162849-18adb9c92b9b
+  github.com/cyphar/filepath-securejoin v0.7.0 (MPL-2.0 and BSD-3-Clause)
+  github.com/hashicorp/aws-sdk-go-base/v2 v2.0.0-beta.74
+  github.com/hashicorp/errwrap v1.1.0
+  github.com/hashicorp/go-cleanhttp v0.5.2
+  github.com/hashicorp/go-getter v1.8.10
+  github.com/hashicorp/go-multierror v1.1.1
+  github.com/hashicorp/go-version v1.9.0
+  github.com/hashicorp/golang-lru/v2 v2.0.7
+  github.com/hashicorp/hcl/v2 v2.25.0
+
+Modules offered under a choice of licences, and the one this product takes:
+  github.com/sorairolake/lzip-go v0.3.8: Apache-2.0 OR MIT; taken under Apache-2.0
+  github.com/spdx/tools-golang v0.6.0-rc4: its code Apache-2.0 OR GPL-2.0-or-later; taken under Apache-2.0
+    (its documentation, CC-BY-4.0, is not compiled in)
+
+The NOTICE files of the Apache-2.0 modules compiled into the binary follow, as each module ships it.
+
+-------- github.com/CycloneDX/cyclonedx-go v0.12.0
+CycloneDX Go
+Copyright (c) OWASP Foundation
+
+This product includes software developed by the
+CycloneDX community (https://cyclonedx.org/).
+-------- github.com/agext/levenshtein v1.2.1
+Alrux Go EXTensions (AGExt) - package levenshtein
+Copyright 2016 ALRUX Inc.
+
+This product includes software developed at ALRUX Inc.
+(http://www.alrux.com/).
+
+-------- github.com/aws/aws-sdk-go-v2 v1.47.1
+AWS SDK for Go
+Copyright 2015 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+Copyright 2014-2015 Stripe, Inc.
+
+-------- github.com/aws/smithy-go v1.28.1
+Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+
+-------- github.com/containerd/containerd/v2 v2.4.2
+Docker
+Copyright 2012-2015 Docker, Inc.
+
+This product includes software developed at Docker, Inc. (https://www.docker.com).
+
+The following is courtesy of our legal counsel:
+
+
+Use and transfer of Docker may be subject to certain restrictions by the
+United States and other governments.
+It is your responsibility to ensure that your use and/or transfer does not
+violate applicable laws.
+
+For more information, please see https://www.bis.doc.gov
+
+See also https://www.apache.org/dev/crypto.html and/or seek legal counsel.
+
+-------- github.com/docker/cli v29.9.2+incompatible
+Docker
+Copyright 2012-2017 Docker, Inc.
+
+This product includes software developed at Docker, Inc. (https://www.docker.com).
+
+This product contains software (https://github.com/creack/pty) developed
+by Keith Rarick, licensed under the MIT License.
+
+The following is courtesy of our legal counsel:
+
+
+Use and transfer of Docker may be subject to certain restrictions by the
+United States and other governments.
+It is your responsibility to ensure that your use and/or transfer does not
+violate applicable laws.
+
+For more information, see https://www.bis.doc.gov
+
+See also https://www.apache.org/dev/crypto.html and/or seek legal counsel.
+
+-------- github.com/skeema/knownhosts v1.3.1
+Copyright 2025 Skeema LLC and the Skeema Knownhosts authors
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+-------- go.yaml.in/yaml/v3 v3.0.5
+Copyright 2011-2016 Canonical Ltd.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+-------- google.golang.org/grpc v1.84.0
+Copyright 2014 gRPC authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
