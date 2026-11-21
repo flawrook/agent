@@ -24,11 +24,13 @@
 # systemd 235 or newer (Debian 10, Ubuntu 18.04, RHEL 8 and later), and installs nothing on an older one.
 # The token goes into /etc/flawrook/agent.yaml only, never into the systemd unit or its environment, and the
 # service starts only once a token is set. FLAWROOK_RELEASE_URL points at another copy of the release (a mirror,
-# a test).
+# a test). FLAWROOK_READ_PROTECTED=1 lets the service read files no other user may (CAP_DAC_READ_SEARCH, in a
+# systemd drop-in, and read_protected: true in agent.yaml); FLAWROOK_READ_PROTECTED=0 takes it away again.
 set -eu
 
 VERSION=@VERSION@
 CONFIG=/etc/flawrook/agent.yaml
+DROPIN=/etc/systemd/system/flawrook-agent.service.d/read-protected.conf
 
 fail() {
   echo "flawrook-agent install: $*" >&2
@@ -79,25 +81,42 @@ set_modes() {
   done
 }
 
-# write_config puts the given url and token into agent.yaml (0600), keeps its other keys, and keeps the
+# write_config puts the given url, token and read_protected into agent.yaml, keeps its other keys, and keeps the
 # previous file as agent.yaml.bak.
 write_config() {
-  [ -n "$url$token" ] || return 0
-  install -d -m 0700 /etc/flawrook
+  [ -n "$url$token$read_protected" ] || return 0
+  install -d -m 0750 /etc/flawrook
   new=$(mktemp /etc/flawrook/.agent.yaml.XXXXXX)
   if [ -f "$CONFIG" ]; then
     drop=""
     [ -z "$url" ] || drop="url"
     [ -z "$token" ] || drop="${drop:+$drop|}token"
+    [ -z "$read_protected" ] || drop="${drop:+$drop|}read_protected"
     grep -Ev "^[[:space:]]*($drop)[[:space:]]*:" "$CONFIG" >"$new" || true
     cp -p "$CONFIG" "$CONFIG.bak"
   fi
   [ -z "$url" ] || echo "url: $url" >>"$new"
   [ -z "$token" ] || echo "token: $token" >>"$new"
-  chmod 0600 "$new"
+  [ -z "$read_protected" ] || echo "read_protected: $read_protected" >>"$new"
   chgrp flawrook "$new" && chmod 0640 "$new"
   mv "$new" "$CONFIG"
   set_modes
+}
+
+# write_dropin gives the service CAP_DAC_READ_SEARCH for read_protected: true, and takes it away for false.
+write_dropin() {
+  case "$read_protected" in
+    true)
+      install -d -m 0755 "${DROPIN%/*}"
+      printf '%s\n' "# install.sh, FLAWROOK_READ_PROTECTED=1: the agent may read files no other user may (read_protected" \
+        "# in $CONFIG). FLAWROOK_READ_PROTECTED=0, or deleting this file, takes it away." \
+        "[Service]" "AmbientCapabilities=CAP_DAC_READ_SEARCH" "CapabilityBoundingSet=CAP_DAC_READ_SEARCH" >"$DROPIN"
+      ;;
+    false)
+      rm -f "$DROPIN"
+      rmdir "${DROPIN%/*}" 2>/dev/null || true
+      ;;
+  esac
 }
 
 has_token() { grep -Eq '^token:[[:space:]]*[^[:space:]#]' "$CONFIG" 2>/dev/null; }
@@ -113,6 +132,12 @@ main() {
   token=${FLAWROOK_TOKEN:-}
   case "$token" in *[!A-Za-z0-9_-]*) fail "FLAWROOK_TOKEN has a character no token has; copy it again from FlawRook" ;; esac
   case "$url" in *[[:space:]\"\'\\]*) fail "FLAWROOK_URL has a space, a quote or a backslash" ;; esac
+  case "${FLAWROOK_READ_PROTECTED:-}" in
+    "") read_protected="" ;;
+    1 | true) read_protected=true ;;
+    0 | false) read_protected=false ;;
+    *) fail "FLAWROOK_READ_PROTECTED must be 1 or 0" ;;
+  esac
   case "$url" in
     "" | https://?* | http://localhost | http://localhost[:/]* | http://127.0.0.1 | http://127.0.0.1[:/]* | "http://[::1]" | "http://[::1]"[:/]*) ;;
     *) fail "FLAWROOK_URL must start with https:// (plain http only to localhost, 127.0.0.1 or [::1])" ;;
@@ -141,6 +166,7 @@ main() {
   # The group and the config first: a package's postinstall starts the service when it finds a token.
   ensure_group
   write_config
+  [ ! -d /run/systemd/system ] || write_dropin
   run_before=$(run_id) pkg=
 
   if command -v dpkg >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then

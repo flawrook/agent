@@ -58,3 +58,46 @@ func TestTheRefusalSaysWhyAndHowOut(t *testing.T) {
 		t.Error("the refusal must be one line")
 	}
 }
+
+func TestReadSearchFromProcStatus(t *testing.T) {
+	status := func(eff string) string {
+		return "Name:\tflawrook-agent\nCapInh:\t0000000000000000\nCapPrm:\t0000000000000004\nCapEff:\t" + eff + "\nCapBnd:\t0000000000000004\n"
+	}
+	for eff, want := range map[string]bool{
+		"0000000000000004": true,  // CAP_DAC_READ_SEARCH alone: the unit's drop-in
+		"000001ffffffffff": true,  // root's full set
+		"0000000000000000": false, // the unit as shipped
+		"0000000000000002": false, // CAP_DAC_OVERRIDE is another bit
+		"zz":               false,
+	} {
+		if got := ReadSearch(status(eff)); got != want {
+			t.Errorf("CapEff %s: %v, want %v", eff, got, want)
+		}
+	}
+	if ReadSearch("Name:\tx\n") {
+		t.Error("no CapEff line reads as holding it")
+	}
+}
+
+func TestReadProtectedMismatch(t *testing.T) {
+	for _, c := range []struct {
+		on, holds bool
+		uid       int
+		want      string
+	}{
+		{false, false, 61234, ""},
+		{true, true, 61234, ""},
+		{true, false, 61234, "read_protected is on, but the agent lacks CAP_DAC_READ_SEARCH"},
+		{false, true, 61234, "the agent holds CAP_DAC_READ_SEARCH, but read_protected is off"},
+		{true, false, 0, ""}, // root reads everything
+		{false, true, 0, ""},
+	} {
+		got := ReadProtectedMismatch(c.on, c.uid, c.holds)
+		if (c.want == "") != (got == "") || !strings.HasPrefix(got, c.want) {
+			t.Errorf("%+v: %q", c, got)
+		}
+		if got != "" && !strings.Contains(got, "FLAWROOK_READ_PROTECTED=") {
+			t.Errorf("%+v: the warning doesn't say how: %q", c, got)
+		}
+	}
+}

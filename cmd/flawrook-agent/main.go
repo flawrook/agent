@@ -59,6 +59,7 @@ func run() int {
 	fs.String("https-proxy", "", "the proxy for HTTPS (env HTTPS_PROXY)")
 	fs.String("no-proxy", "", "hosts to reach without the proxy (env NO_PROXY)")
 	fs.String("include-mounts", "", "network or FUSE mount points to walk all the same, comma-separated (env FLAWROOK_INCLUDE_MOUNTS)")
+	fs.Bool("read-protected", false, "the unit gives the agent CAP_DAC_READ_SEARCH, to read files no other user may (env FLAWROOK_READ_PROTECTED; install.sh sets it)")
 	dryRun := fs.Bool("dry-run", false, "print the exact report, before gzip, and send nothing")
 	interval := fs.Duration("interval", time.Hour, "for testing only: the time between runs")
 	showVersion := fs.Bool("version", false, "print the version")
@@ -93,10 +94,20 @@ func run() int {
 	}
 	host := hostinfo.New()
 	skippedMounts := "" // logged when it changes
+	readProtectedWarning := ""
 	a := &agent.Agent{
 		Agent: report.Agent{Version: version, OS: runtime.GOOS, Arch: runtime.GOARCH},
 		Load: func() (config.Config, error) {
-			return config.Load(config.Sources{Flags: flags, Env: os.Getenv, Path: *path})
+			c, err := config.Load(config.Sources{Flags: flags, Env: os.Getenv, Path: *path})
+			if err == nil { // at the start and on each reload: read_protected against the capability held
+				status, _ := os.ReadFile("/proc/self/status")
+				if w := sandbox.ReadProtectedMismatch(c.ReadProtected, os.Geteuid(), sandbox.ReadSearch(string(status))); w != readProtectedWarning {
+					if readProtectedWarning = w; w != "" {
+						log.Warn(w)
+					}
+				}
+			}
+			return c, err
 		},
 		Host:    host.Read,
 		Backoff: agent.DefaultBackoff,

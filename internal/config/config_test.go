@@ -176,3 +176,27 @@ func TestIncludeMounts(t *testing.T) {
 		t.Fatal("Equal doesn't see a changed include_mounts (SIGHUP would miss it)")
 	}
 }
+
+// 0.2.0: read_protected is off unless the file, the environment or a flag turns it on, in that order of
+// precedence; anything but a boolean is an error, not a silent off.
+func TestReadProtected(t *testing.T) {
+	if got, err := Load(Sources{Env: env(nil), Path: writeFile(t, "url: https://flawrook.dev\n")}); err != nil || got.ReadProtected {
+		t.Fatalf("the default: %v %v", got.ReadProtected, err)
+	}
+	path := writeFile(t, "read_protected: true\n")
+	if got, _ := Load(Sources{Env: env(nil), Path: path}); !got.ReadProtected {
+		t.Fatal("the file's true")
+	}
+	if got, _ := Load(Sources{Env: env(map[string]string{"FLAWROOK_READ_PROTECTED": "0"}), Path: path}); got.ReadProtected {
+		t.Fatal("the environment's 0 over the file")
+	}
+	if got, _ := Load(Sources{Flags: map[string]string{"read_protected": "true"}, Env: env(map[string]string{"FLAWROOK_READ_PROTECTED": "false"}), Path: path}); !got.ReadProtected {
+		t.Fatal("a flag over the environment")
+	}
+	if _, err := Load(Sources{Env: env(map[string]string{"FLAWROOK_READ_PROTECTED": "yes"}), Path: path}); err == nil || !strings.Contains(err.Error(), "read_protected") {
+		t.Fatalf("yes is accepted: %v", err)
+	}
+	if _, err := Load(Sources{Env: env(nil), Path: writeFile(t, "read_protected: maybe\n")}); err == nil {
+		t.Fatal("a file's non-boolean is accepted")
+	}
+}

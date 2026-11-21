@@ -20,7 +20,9 @@ FlawRook. FlawRook matches it against vulnerability data. The agent runs as a sy
 - The service runs as a user of its own (systemd `DynamicUser`) with no capabilities: the package databases and the runtimes' binaries are readable by every user. It can't write elsewhere: `ProtectSystem=strict` and `ProtectHome=read-only`.
 - It reads its settings through the `flawrook` group, a system group that root and the service alone share. `/etc/flawrook` is 0750 and its files 0640, root:flawrook, so only root and the service read the token; any other user gets "Permission denied". The packages and `install.sh` create the group, and set those modes on every install and upgrade. The group stays when the agent is removed, as most packages leave theirs.
 
-**Memory.**
+**Files no other user may read.** By default the agent reads what every user can, which is all its catalogers need. To let it read protected files too (a runtime in a directory only root may enter), run `install.sh` with `FLAWROOK_READ_PROTECTED=1`. It adds `CAP_DAC_READ_SEARCH` in a systemd drop-in, `/etc/systemd/system/flawrook-agent.service.d/read-protected.conf`, and writes `read_protected: true` in `agent.yaml`. The capability lets the agent read any file and grants nothing else. To undo it, run `install.sh` with `FLAWROOK_READ_PROTECTED=0`; or delete the drop-in, set `read_protected: false`, and run `sudo systemctl daemon-reload` and `sudo systemctl restart flawrook-agent`. If the setting and the drop-in disagree, the agent says so in its log at start and on a reload.
+
+**Memory and time.**
 - Go's heap is held to 96 MiB (`GOMEMLIMIT`), and the whole process is capped at 256 MB (`MemoryMax=256M`).
 - The measured peak is 108 to 149 MB, on Debian 12 and 13, Ubuntu 24.04, Alpine 3.20 and Rocky Linux 9 test hosts and on runtime images (Node.js, Python, PHP, Redis, nginx, Go). The binary itself is a large part of that.
 - A scan took under 4 seconds on those hosts.
@@ -92,6 +94,7 @@ It needs systemd 235 or newer: Debian 10, Ubuntu 18.04, RHEL, Rocky Linux and Al
 | `ca_file` | `FLAWROOK_CA_FILE` | A PEM bundle trusted besides the system's |
 | `https_proxy`, `no_proxy` | `HTTPS_PROXY`, `NO_PROXY` | A proxy for the connection to FlawRook |
 | `include_mounts` | `FLAWROOK_INCLUDE_MOUNTS` | Network or FUSE mount points to walk anyway (absolute paths) |
+| `read_protected` | `FLAWROOK_READ_PROTECTED` | `true` when the unit holds `CAP_DAC_READ_SEARCH` (see Files no other user may read). `install.sh` sets both |
 
 `sudo systemctl reload flawrook-agent` rereads the file.
 

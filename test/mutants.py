@@ -72,6 +72,13 @@ M = [
  ("internal/inventory/narrow.go", "\t\tif err != nil || rel == \"..\" || strings.HasPrefix(rel, \"../\") {", "\t\tif err != nil {", "./internal/inventory/", "a symlink out of root resolved"),
  ("internal/inventory/narrow.go", "\t\"/usr/local/bin\", \"/usr/local/sbin\", \"/usr/local/lib\", \"/usr/local/go\",", "\t\"/usr/local/sbin\", \"/usr/local/lib\", \"/usr/local/go\",", "./internal/inventory/", "/usr/local/bin not read"),
  ("internal/inventory/inventory.go", "\tif secs < 10 {", "\tif secs < 0 {", "./internal/inventory/", "scan line: no tenths under 10 s"),
+ # 0.2.0: read_protected, and the capability it stands for.
+ ("internal/config/config.go", "\t\tc.ReadProtected = on\n", "\t\t_ = on\n", "./internal/config/", "read_protected's env and flag ignored"),
+ ("internal/config/config.go", "\tc.ReadProtected = f.ReadProtected\n", "", "./internal/config/", "read_protected's file key ignored"),
+ ("internal/config/config.go", "\t\t\treturn Config{}, fmt.Errorf(\"read_protected: %q is neither true nor false\", v)", "\t\t\ton, err = false, nil", "./internal/config/", "a bad read_protected read as off"),
+ ("internal/sandbox/sandbox.go", "const capDACReadSearch = 1 << 2", "const capDACReadSearch = 1 << 1", "./internal/sandbox/", "CAP_DAC_OVERRIDE's bit"),
+ ("internal/sandbox/sandbox.go", "\tcase uid == 0 || readProtected == readSearch:", "\tcase readProtected == readSearch:", "./internal/sandbox/", "root warned"),
+ ("internal/sandbox/sandbox.go", "\tcase uid == 0 || readProtected == readSearch:", "\tcase uid == 0 || readProtected || readSearch:", "./internal/sandbox/", "a mismatch not warned"),
  ("internal/config/config.go", "\t} else if v := s.Env(\"FLAWROOK_INCLUDE_MOUNTS\"); v != \"\" {", "\t} else if v := s.Env(\"FLAWROOK_INCLUDE_MOUNTS\"); false && v != \"\" {", "./internal/config/", "include_mounts env ignored"),
  ("internal/config/config.go", "func (c Config) Equal(o Config) bool { return reflect.DeepEqual(c, o) }", "func (c Config) Equal(o Config) bool { _ = reflect.DeepEqual; return c.URL == o.URL && c.Token == o.Token }", "./internal/config/", "Equal blind to include_mounts"),
  ("internal/inventory/inventory.go", "Exclude: source.ExcludeConfig{Paths: append(append([]string(nil), Skip...), skip...)}", "Exclude: source.ExcludeConfig{Paths: append(append([]string(nil), Skip...), skip[:0]...)}", "./internal/inventory/", "mount exclusions not applied"),

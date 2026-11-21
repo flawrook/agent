@@ -27,6 +27,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 
 	"go.yaml.in/yaml/v3"
@@ -46,6 +47,9 @@ type Config struct {
 	HTTPSProxy    string
 	NoProxy       string
 	IncludeMounts []string // network or FUSE mount points walked all the same (absolute, cleaned)
+	// ReadProtected says the unit was given CAP_DAC_READ_SEARCH (install.sh's FLAWROOK_READ_PROTECTED=1 drop-in),
+	// to read files no other user may; off, the agent reads what's world-readable, as the catalogers need.
+	ReadProtected bool
 }
 
 // Equal tells a SIGHUP whether the config changed.
@@ -61,6 +65,7 @@ type file struct {
 	NoProxy    string `yaml:"no_proxy"`
 	// A list in the file; comma-separated as a flag or in the environment.
 	IncludeMounts []string `yaml:"include_mounts"`
+	ReadProtected bool     `yaml:"read_protected"`
 }
 
 // The environment variables per key, the first set one wins.
@@ -71,6 +76,8 @@ var envNames = map[string][]string{
 	"ca_file":     {"FLAWROOK_CA_FILE"},
 	"https_proxy": {"HTTPS_PROXY", "https_proxy"},
 	"no_proxy":    {"NO_PROXY", "no_proxy"},
+	// true or false, as strconv.ParseBool reads it (1, t, TRUE, ...).
+	"read_protected": {"FLAWROOK_READ_PROTECTED"},
 }
 
 // Sources are where the settings come from: the flags given on the command line (by key; a flag
@@ -106,6 +113,14 @@ func Load(s Sources) (Config, error) {
 		CAFile:     pick("ca_file", f.CAFile),
 		HTTPSProxy: pick("https_proxy", f.HTTPSProxy),
 		NoProxy:    pick("no_proxy", f.NoProxy),
+	}
+	c.ReadProtected = f.ReadProtected
+	if v := pick("read_protected", ""); v != "" {
+		on, err := strconv.ParseBool(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("read_protected: %q is neither true nor false", v)
+		}
+		c.ReadProtected = on
 	}
 	include := f.IncludeMounts
 	if v, ok := s.Flags["include_mounts"]; ok {
