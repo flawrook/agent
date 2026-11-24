@@ -87,6 +87,13 @@ func run() int {
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		return 2
 	}
+	// Nothing may follow the flags: a stray word, `version` or a mistyped subcommand gets the usage, as an unknown
+	// flag does, and never starts the agent. sbom, above, is the only subcommand.
+	if fs.NArg() > 0 {
+		fmt.Fprintf(fs.Output(), "unexpected argument %q\n", fs.Arg(0))
+		fs.Usage()
+		return 2
+	}
 	if *showVersion {
 		fmt.Printf("flawrook-agent %s (protocol %d, %s)\n", version, report.Protocol, runtime.Version())
 		return 0

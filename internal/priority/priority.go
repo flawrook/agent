@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build linux
+
 // Package priority lowers the agent's own CPU and IO priority before it scans, so that a run outside
 // systemd (by hand, from cron, in a container) is as gentle as the service, whose unit sets the same:
 // Nice=19, and best-effort IO at level 7 (not the idle class, which starves on a disk that is never idle).

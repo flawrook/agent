@@ -96,6 +96,9 @@ M = [
  ("cmd/flawrook-agent/reload.go", "err != nil || mainPID != pid {", "false && (err != nil || mainPID != pid) {", "./cmd/flawrook-agent/", "--reload without the MAINPID check"),
  ("cmd/flawrook-agent/reload.go", "name != \"flawrook-agent\" {", "false && name != \"flawrook-agent\" {", "./cmd/flawrook-agent/", "--reload signals any program"),
  ("cmd/flawrook-agent/reload.go", "errors.Is(err, syscall.ESRCH) {", "false && errors.Is(err, syscall.ESRCH) {", "./cmd/flawrook-agent/", "--reload: a gone agent not said"),
+ # 0.3.1: nothing may follow the flags (`flawrook-agent version` started the agent).
+ ("cmd/flawrook-agent/main.go", "\tif fs.NArg() > 0 {", "\tif false && fs.NArg() > 0 {", "./cmd/flawrook-agent/", "a leftover argument starts the agent"),
+ ("cmd/flawrook-agent/main.go", "\t\tfs.Usage()\n\t\treturn 2\n", "\t\tfs.Usage()\n\t\treturn 0\n", "./cmd/flawrook-agent/", "a leftover argument exits 0"),
 # Cluster mode (M29 phase 2, cluster contract draft 2).
  ('internal/hostinfo/hostinfo.go', 'return appSpecific(key, ClusterAppID), nil', 'return appSpecific(key, AppID), nil', './internal/hostinfo/', 'cluster id under the host app id'),
  ('internal/kube/kube.go', 'Proxy:               nil, // never a proxy: see the package comment', 'Proxy:               http.ProxyFromEnvironment,', './internal/kube/', 'apiserver through HTTPS_PROXY'),
