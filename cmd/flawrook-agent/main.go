@@ -15,6 +15,7 @@
 // flawrook-agent reports a server's OS packages and runtimes to FlawRook every hour: outbound HTTPS
 // only, no port opened, no remote commands, read-only everywhere but its own state directory. In cluster mode
 // (the Helm chart's FLAWROOK_MODE=cluster) it reports a Kubernetes cluster's workloads, images and nodes instead.
+// `flawrook-agent sbom <archive>` writes a built image's SBOM for a CI job and does nothing else.
 package main
 
 import (
@@ -54,7 +55,16 @@ func main() {
 }
 
 func run() int {
+	// The subcommand, before the agent's own flags: it reads no config and no token.
+	if len(os.Args) > 1 && os.Args[1] == "sbom" {
+		return runSBOM(os.Args[2:], os.Stdout, os.Stderr)
+	}
 	fs := flag.NewFlagSet("flawrook-agent", flag.ContinueOnError)
+	fs.Usage = func() {
+		fmt.Fprint(fs.Output(), "Usage: flawrook-agent [flags]\n"+
+			"       flawrook-agent sbom [flags] <archive>   a built image's SBOM, for CI (flawrook-agent sbom --help)\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
 	path := fs.String("config", config.DefaultPath, "the config file")
 	fs.String("url", "", "FlawRook's address (env FLAWROOK_URL, default "+config.DefaultURL+")")
 	fs.String("token", "", "the agent token (env FLAWROOK_TOKEN; prefer the config file, a flag shows in ps)")

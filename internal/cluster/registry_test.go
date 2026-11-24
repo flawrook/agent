@@ -265,7 +265,7 @@ func TestDownloadAndSBOM(t *testing.T) {
 		t.Fatal(st)
 	}
 	ref := host + "/lib/sbom:1"
-	raw, packages, err := SBOM(context.Background(), dir, ref, "0.3.0")
+	raw, packages, err := SBOM(context.Background(), SBOMSource{Tag: "oci-dir", Path: dir, Name: ref}, "0.3.0")
 	if err != nil {
 		t.Fatal(err)
 	}

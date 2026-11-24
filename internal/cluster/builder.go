@@ -48,7 +48,7 @@ func (b *Builder) Build(ctx context.Context, img Image, res Resolved) ([]byte, i
 	if st := b.Registry.Download(ctx, res, filepath.Join(dir, "layout")); st != nil {
 		return nil, 0, st
 	}
-	sbom, packages, err := SBOM(ctx, filepath.Join(dir, "layout"), img.Ref, b.Version)
+	sbom, packages, err := SBOM(ctx, SBOMSource{Tag: "oci-dir", Path: filepath.Join(dir, "layout"), Name: img.Ref}, b.Version)
 	if err != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return nil, 0, &Status{Status: Error, Reason: "timeout", Detail: "the build ran out of time"}

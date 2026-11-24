@@ -20,6 +20,7 @@
 #   1. --dry-run: no connection at all, and no DNS lookup.
 #   2. A report and then a heartbeat to FLAWROOK_URL: connections to the stub only, and DNS for its host only.
 #   3. The same through HTTPS_PROXY: connections to the proxy only, and DNS for the proxy's host only.
+#   4. sbom over a docker archive of this proof's tools image: no connection, no DNS lookup, and no config file opened.
 # Docker's DNS (127.0.0.11) answers the lookups; those connections are the resolver's and are listed apart.
 # Usage: test/network-proof.sh [out-dir]
 # PREBUILT=1 uses dist/flawrook-agent-linux-<arch> and dist/stub-linux-<arch> as they are, without building.
@@ -60,7 +61,9 @@ STUB_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{
 PROXY_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$NET-proxy")
 
 # run <name> <agent arguments> [-e ...]: the agent under strace (Go's SIGURG preemption signals left out), with
-# tcpdump capturing all the while; after 45 s at most the agent gets SIGTERM, as from systemctl stop.
+# tcpdump capturing all the while; after 45 s at most the agent gets SIGTERM, as from systemctl stop. TRACE names the
+# system calls traced (connect, unless set).
+TRACE=connect
 run() {
   name=$1 args=$2
   shift 2
@@ -68,7 +71,7 @@ run() {
     -e FLAWROOK_URL=https://stub:8443 -e FLAWROOK_TOKEN=flra_test -e FLAWROOK_CA_FILE=/out/stub/ca.pem "$@" "$TOOLS" sh -c "
       tcpdump -i any -n -U -w /out/$name.pcap 2>/dev/null & dump=\$!
       sleep 1
-      strace -f -qq -e trace=connect -e signal=none -o /out/$name.strace /usr/bin/flawrook-agent $args >/out/$name.out 2>/out/$name.log & s=\$!
+      strace -f -qq -e trace=$TRACE -e signal=none -o /out/$name.strace /usr/bin/flawrook-agent $args >/out/$name.out 2>/out/$name.log & s=\$!
       i=0; while kill -0 \$s 2>/dev/null && [ \$i -lt 45 ]; do sleep 1; i=\$((i + 1)); done
       pkill -TERM -f '^/usr/bin/flawrook-agent'; wait \$s # busybox's pkill -x doesn't match it by name
       sleep 1; kill \$dump; wait \$dump 2>/dev/null; true"
@@ -76,6 +79,10 @@ run() {
 run dry-run --dry-run
 run direct "--interval 20s"
 run proxy "--interval 20s" -e HTTPS_PROXY=http://proxy:3128
+docker save -o "$OUT/image.tar" "$TOOLS"
+TRACE=connect,openat
+run sbom "sbom --out /out/sbom.json /out/image.tar"
+TRACE=connect
 
 # What each run reached: the TCP/UDP endpoints it connected to, and the names it looked up.
 fail=0
@@ -99,6 +106,10 @@ summary() {
 summary dry-run 'none'
 summary direct "$STUB_IP:8443" stub
 summary proxy "$PROXY_IP:3128" proxy
+summary sbom 'none'
+if grep -E 'openat\(.*"/etc/flawrook' "$OUT/sbom.strace"; then echo "  FAIL: sbom opened a config file"; fail=1; fi
+if grep -q '"specVersion":"1.7"' "$OUT/sbom.json" 2>/dev/null; then echo "sbom: $(grep -o '"name":"[^"]*"' "$OUT/sbom.json" | wc -l | tr -d ' ') names in the SBOM, no file under /etc/flawrook opened"
+else echo "  FAIL: sbom wrote no SBOM: $(cat "$OUT/sbom.log")"; fail=1; fi
 grep -h 'msg="report sent"\|msg="heartbeat sent"' "$OUT/direct.log" "$OUT/proxy.log" | sed -E 's/.*msg="([^"]+)".*status=([0-9]+).*/  \1 \2/' | sort | uniq -c
 docker logs "$NET-proxy" 2>&1 | grep CONNECT | sort | uniq -c
 echo "stub $STUB_IP, proxy $PROXY_IP"

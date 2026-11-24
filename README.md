@@ -102,6 +102,45 @@ the signed image `ghcr.io/flawrook/agent`. Both are signed with the same key as 
 to check the signatures, install, and uninstall leaving nothing behind: see
 [deploy/helm/flawrook-agent/README.md](deploy/helm/flawrook-agent/README.md).
 
+## CI: the SBOM of a built image
+
+`flawrook-agent sbom <archive>` writes the CycloneDX SBOM of an image your pipeline has just built, for the job to
+send to FlawRook with its CI token (FlawRook's CI API docs, "Sending a built image"). It runs the same catalogers as
+cluster mode. It reads no config file and no token, connects to nothing, and needs no root.
+
+```sh
+docker buildx build -o type=oci,dest=image.tar .   # or: docker save -o image.tar <image>
+flawrook-agent sbom --out sbom.json image.tar
+```
+
+- **The input:**
+  - an OCI archive (`docker buildx build -o type=oci,dest=…`) or an OCI layout directory, keyed by the image's
+    platform manifest digest, the one a registry shows once the image is pushed. Prefer this form.
+  - a docker archive (`docker save`). It carries no registry manifest, so its key is the image ID, the config
+    digest. A `docker save` that also writes an OCI `index.json` (Docker's containerd image store) is still read as a
+    docker archive.
+- **The output:** CycloneDX 1.7 JSON, on stdout or in `--out`.
+  - `metadata.component.name` is the image's name as the archive gives it, or `--ref` when it gives none.
+  - `metadata.component.version` is the key.
+  - `metadata.properties` carry `flawrook:image.keyKind` (`manifest` or `config`), `flawrook:image.manifestDigest`
+    (OCI only), `flawrook:image.configDigest`, `flawrook:image.platform` and `flawrook:image.sizeBytes`.
+- **The flags:**
+  - `--out <file>`: the SBOM's file; stdout by default.
+  - `--max-image-bytes <n>`: the largest image read, by its layers as the archive stores them; 300 MiB by default,
+    as in cluster mode. A job that builds larger images raises it, for example `--max-image-bytes 1073741824`.
+  - `--platform <os/arch>`: the image to take from an OCI index of several platforms; `linux/amd64` by default. An
+    archive of one image is read whatever its platform.
+  - `--ref <name:tag>`: the image's name when the archive gives none, as an OCI layout without the
+    `io.containerd.image.name` annotation doesn't.
+- **The exit status**, with one line on stderr for each failure:
+  - 0: the SBOM is written.
+  - 1: the archive can't be read or catalogued, for example `image.tar: not a Docker or OCI archive`.
+  - 2: over a limit. Either `too large: <n> bytes compressed, the limit is <m>` (`uncompressed` for a classic
+    `docker save`, whose layers aren't compressed), or `the SBOM is over 20 MiB; split the image or raise the limit on
+    your FlawRook`.
+- **Disk:** the image is unpacked into `TMPDIR` while it is read, an OCI archive whole. Leave the room cluster mode
+  needs, about 5 times the image's compressed size.
+
 ## The unit's hardening, by systemd version
 
 `install.sh` and the packages need systemd 235 or newer. Each line of the unit needs the systemd version shown, from
