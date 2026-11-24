@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Builder is Images over the registry and Syft: each image is downloaded into an OCI layout under TempDir (TMPDIR,
@@ -57,28 +58,65 @@ func (b *Builder) Build(ctx context.Context, img Image, res Resolved) ([]byte, i
 	return sbom, packages, nil
 }
 
-// CgroupMemory reads the container's cgroup v2 memory after a build, for the log: current, peak, and the anon/file
-// split (page cache counts towards the limit too). Nothing when the files aren't there.
-func CgroupMemory(root string) func() []any {
-	return func() []any {
-		var out []any
-		for _, f := range []struct{ file, key string }{{"memory.current", "memCurrentMiB"}, {"memory.peak", "memPeakMiB"}} {
-			if n, ok := readInt(filepath.Join(root, f.file)); ok {
-				out = append(out, f.key, n>>20)
+// CgroupMemory reads the container's cgroup v2 memory for each build's built line. Started as a build starts, it reads
+// memory.current every period until the func it returns is called. That func stops it and gives memBuildMaxMiB, the
+// highest value read (with builds at once, it covers them all), then what the files say when the build ends: current,
+// peak (the pod's lifetime peak), and the anon/file split (page cache counts towards the limit too). Nothing for a
+// file that isn't there.
+func CgroupMemory(root string, every time.Duration) func() func() []any {
+	return func() func() []any {
+		high := int64(-1)
+		sample := func() {
+			if n, ok := readInt(filepath.Join(root, "memory.current")); ok {
+				high = max(high, n)
 			}
 		}
-		if f, err := os.Open(filepath.Join(root, "memory.stat")); err == nil {
-			defer f.Close()
-			sc := bufio.NewScanner(f)
-			for sc.Scan() {
-				k, v, _ := strings.Cut(sc.Text(), " ")
-				if n, err := strconv.ParseInt(v, 10, 64); err == nil && (k == "anon" || k == "file") {
-					out = append(out, "mem"+strings.ToUpper(k[:1])+k[1:]+"MiB", n>>20)
+		sample()
+		done, stopped := make(chan struct{}), make(chan struct{})
+		go func() {
+			defer close(stopped)
+			tick := time.NewTicker(every)
+			defer tick.Stop()
+			for {
+				select {
+				case <-done:
+					return
+				case <-tick.C:
+					sample()
 				}
 			}
+		}()
+		return func() []any {
+			close(done)
+			<-stopped
+			var out []any
+			if high >= 0 {
+				out = append(out, "memBuildMaxMiB", high>>20)
+			}
+			return append(out, cgroupMemory(root)...)
 		}
-		return out
 	}
+}
+
+// cgroupMemory reads the cgroup's memory files once.
+func cgroupMemory(root string) []any {
+	var out []any
+	for _, f := range []struct{ file, key string }{{"memory.current", "memCurrentMiB"}, {"memory.peak", "memPeakMiB"}} {
+		if n, ok := readInt(filepath.Join(root, f.file)); ok {
+			out = append(out, f.key, n>>20)
+		}
+	}
+	if f, err := os.Open(filepath.Join(root, "memory.stat")); err == nil {
+		defer f.Close()
+		sc := bufio.NewScanner(f)
+		for sc.Scan() {
+			k, v, _ := strings.Cut(sc.Text(), " ")
+			if n, err := strconv.ParseInt(v, 10, 64); err == nil && (k == "anon" || k == "file") {
+				out = append(out, "mem"+strings.ToUpper(k[:1])+k[1:]+"MiB", n>>20)
+			}
+		}
+	}
+	return out
 }
 
 // MemoryLimit is 75 % of the cgroup's memory.max, for GOMEMLIMIT when it isn't set; 0 when there is no limit.

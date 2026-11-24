@@ -24,7 +24,7 @@ jobs:
             -H "Authorization: Bearer $FLAWROOK_TOKEN" \
             -F repo=${GITHUB_SERVER_URL#https://}/$GITHUB_REPOSITORY \
             -F ref=${GITHUB_HEAD_REF:-$GITHUB_REF_NAME} \
-            -F default_branch=$DEFAULT_BRANCH -F commit=$HEAD_SHA 2>/dev/null)
+            -F default_branch=$DEFAULT_BRANCH -F commit=$HEAD_SHA 2>/dev/null) || code=000
           case "$code" in [1-9][0-9][0-9]) ;; *) code=000 ;; esac
           if [ "$code" != 200 ]; then
             echo "::warning::FlawRook: the commit was not checked ($( [ "$code" = 000 ] && echo "no connection" || echo "HTTP $code"))"

@@ -19,6 +19,8 @@
 # below hold the chart to what it promises (cluster draft 2's "The chart"): kube-system and the lists and watches
 # of pods and nodes, and nothing else; the hardened pod; the capped scratch space on disk; the token from a Secret;
 # credentials mounted read-only; the final setting names; and a schema that refuses a misspelt or missing value.
+# It also renders the largeImages preset, given after the user's file as the README says, and checks that the
+# README prints the preset exactly as the chart ships it.
 #   test/chart-test.sh [dir]     renders into dir (default dist/chart-test)
 # HELM=helm runs a local Helm instead of the image, and KUBECONFORM=skip skips the schema check (test/mutants.py
 # sets it); with both, nothing runs in Docker.
@@ -30,6 +32,7 @@ KUBECONFORM_IMAGE=ghcr.io/yannh/kubeconform:v0.8.0@sha256:faffaf43f95aa6425306e1
 KUBE_VERSIONS="1.25.0 1.37.0" # Chart.yaml's kubeVersion floor, and the version the spike's cluster ran
 CHART=deploy/helm/flawrook-agent
 SETS="minimal existing-secret everything rbac-off"
+PRESET=$CHART/presets/large-images.yaml
 mkdir -p "${1:-dist/chart-test}" && OUT=$(cd "${1:-dist/chart-test}" && pwd) || exit 1
 checks=0
 fails=0
@@ -153,6 +156,38 @@ check "concurrency" env_is everything FLAWROOK_SBOM_CONCURRENCY '"2"'
 check "scheduling values" has everything Deployment "      priorityClassName: acme-low"
 check "ServiceAccount annotations" has everything ServiceAccount "    eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/flawrook-agent"
 
+echo "sizing: the 300 MiB default, and the largeImages preset as a second --values"
+check "the image size cap, 300 MiB by default" env_is minimal FLAWROOK_SBOM_MAX_IMAGE_BYTES '"314572800"'
+check "large-images: lints" helm lint --strict "$CHART" --values test/chart/minimal.yaml --values "$PRESET"
+for set in large-images after-preset; do
+  case $set in
+  large-images) values="--values test/chart/minimal.yaml --values $PRESET" ;;
+  *) values="--values test/chart/minimal.yaml --values $PRESET --values test/chart/after-preset.yaml" ;;
+  esac
+  # shellcheck disable=SC2086 # one argument per word of $values
+  if helm template flawrook-agent "$CHART" --namespace flawrook $values >"$OUT/$set.yaml" 2>"$OUT/$set.err"; then
+    ok "$set: renders"
+  else
+    bad "$set: renders: $(tr '\n' ' ' <"$OUT/$set.err")"
+  fi
+done
+check "large-images: the cap, 1 GiB" env_is large-images FLAWROOK_SBOM_MAX_IMAGE_BYTES '"1073741824"'
+check "large-images: 4Gi of memory, cpu unchanged" block_is large-images Deployment "            limits:" 3 "            limits:|              cpu: 250m|              memory: 4Gi"
+check "large-images: the requests unchanged" block_is large-images Deployment "            requests:" 3 "            requests:|              cpu: 50m|              memory: 128Mi"
+check "large-images: 6Gi of scratch" block_is large-images Deployment "        - name: scratch" 3 "        - name: scratch|          emptyDir:|            sizeLimit: 6Gi"
+check "a file after the preset wins" block_is after-preset Deployment "            limits:" 3 "            limits:|              cpu: 250m|              memory: 8Gi"
+check "a file after the preset: the preset's other keys stay" env_is after-preset FLAWROOK_SBOM_MAX_IMAGE_BYTES '"1073741824"'
+check "a file after the preset: the preset's scratch stays" block_is after-preset Deployment "        - name: scratch" 3 "        - name: scratch|          emptyDir:|            sizeLimit: 6Gi"
+# The README's copy of the preset: the yaml block whose first line is the preset's.
+readme_preset() {
+  awk -v first="$(head -n 1 "$PRESET")" '
+    copy && $0 == "```" { exit }
+    copy { print; next }
+    prev == "```yaml" && $0 == first { copy = 1; print }
+    { prev = $0 }' "$CHART/README.md"
+}
+check "the README prints the preset as the chart ships it" [ "$(readme_preset)" = "$(cat "$PRESET")" ]
+
 echo "the schema refuses"
 refused "no token" token --set flawrook.url=https://flawrook.acme.io
 refused "a token and an existingSecret" existingSecret --values test/chart/minimal.yaml --set flawrook.existingSecret=flawrook-token
@@ -171,7 +206,7 @@ else
   for v in $KUBE_VERSIONS; do
     # shellcheck disable=SC2046 # one argument per rendered file
     if docker run --rm --label org.flawrook.agent=build --memory 256m -v "$OUT":/rendered:ro "$KUBECONFORM_IMAGE" \
-      -strict -summary -kubernetes-version "$v" $(for set in $SETS; do echo "/rendered/$set.yaml"; done) >"$OUT/kubeconform-$v.txt" 2>&1; then
+      -strict -summary -kubernetes-version "$v" $(for set in $SETS large-images; do echo "/rendered/$set.yaml"; done) >"$OUT/kubeconform-$v.txt" 2>&1; then
       ok "Kubernetes $v: $(tail -1 "$OUT/kubeconform-$v.txt")"
     else
       bad "Kubernetes $v: $(tr '\n' ' ' <"$OUT/kubeconform-$v.txt")"

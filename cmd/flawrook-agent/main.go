@@ -68,7 +68,7 @@ func run() int {
 	fs.String("cluster-name", "", "cluster mode: the name FlawRook shows (env FLAWROOK_CLUSTER_NAME)")
 	fs.String("namespaces-include", "", "cluster mode: only these namespaces, comma-separated (env FLAWROOK_NAMESPACES_INCLUDE)")
 	fs.String("namespaces-exclude", "", "cluster mode: not these namespaces, comma-separated (env FLAWROOK_NAMESPACES_EXCLUDE)")
-	fs.String("sbom-max-image-bytes", "", "cluster mode: the largest image pulled, compressed (env FLAWROOK_SBOM_MAX_IMAGE_BYTES, default 1 GiB)")
+	fs.String("sbom-max-image-bytes", "", "cluster mode: the largest image pulled, compressed (env FLAWROOK_SBOM_MAX_IMAGE_BYTES, default 300 MiB)")
 	fs.String("sbom-concurrency", "", "cluster mode: images built at once, 1 to 4 (env FLAWROOK_SBOM_CONCURRENCY)")
 	dryRun := fs.Bool("dry-run", false, "print the exact report, before gzip, and send nothing")
 	interval := fs.Duration("interval", time.Hour, "for testing only: the time between runs (cluster mode: env FLAWROOK_INTERVAL, 10m to 24h)")
@@ -226,7 +226,7 @@ func runCluster(c config.Config, log *slog.Logger, dryRun bool, interval time.Du
 		Sleep:   agent.SleepContext,
 		Now:     time.Now,
 		Log:     log,
-		Memory:  cluster.CgroupMemory(cgroupRoot),
+		Memory:  cluster.CgroupMemory(cgroupRoot, time.Second),
 	}
 	if err := r.Identify(ns.Metadata.UID, clusterVersion); err != nil {
 		log.Error("not started", "error", err)

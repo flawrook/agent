@@ -40,7 +40,7 @@ const (
 
 	// Cluster mode's defaults (the cluster contract's configuration names); server mode ignores these settings.
 	DefaultClusterInterval   = time.Hour
-	DefaultSBOMMaxImageBytes = 1 << 30 // compressed layers; a larger image is reported too-large, not pulled
+	DefaultSBOMMaxImageBytes = 300 << 20 // compressed layers; a larger image is reported too-large, not pulled
 	DefaultSBOMConcurrency   = 1
 )
 

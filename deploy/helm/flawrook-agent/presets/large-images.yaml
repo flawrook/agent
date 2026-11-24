@@ -1,0 +1,8 @@
+# The largeImages preset, for images up to 1 GiB compressed. Give it as a second --values, after your own file.
+sbom:
+  maxImageBytes: 1073741824
+resources:
+  limits:
+    memory: 4Gi
+scratch:
+  sizeLimit: 6Gi

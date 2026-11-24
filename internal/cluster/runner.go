@@ -17,6 +17,7 @@ package cluster
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -60,7 +61,7 @@ type Runner struct {
 	Sleep   func(ctx context.Context, d time.Duration) error
 	Now     func() time.Time
 	Log     *slog.Logger
-	Memory  func() []any // the cgroup's memory, logged after each build
+	Memory  func() func() []any // started as a build starts; stopping it gives the built line's memory fields
 
 	info       Info
 	acked      string
@@ -93,6 +94,23 @@ func (r *Runner) Identify(uid string, version *string) error {
 }
 
 func (r *Runner) scope() Scope { return r.info.Scope }
+
+// errWaiting ends a run whose new snapshot came from incomplete lists: it sends nothing more.
+var errWaiting = errors.New("waiting for complete pod and node lists")
+
+// errStale ends a heartbeat's retries when the cluster changed during them: the report goes instead.
+var errStale = errors.New("the cluster changed during the retries")
+
+// current is a new snapshot, for the run's start, a retry or the build round; errWaiting while the lists aren't
+// complete.
+func (r *Runner) current() (Report, error) {
+	rep, ok := r.snapshot()
+	if !ok {
+		r.Log.Info("waiting for complete pod and node lists")
+		return Report{}, errWaiting
+	}
+	return rep, nil
+}
 
 // snapshot builds the report from the source; ok is false while the lists aren't complete.
 func (r *Runner) snapshot() (Report, bool) {
@@ -138,47 +156,68 @@ const (
 // send must wait for the pacing, so the caller can run again at that time.
 func (r *Runner) Cycle(ctx context.Context, why Trigger) (retryAt time.Time, err error) {
 	defer debug.FreeOSMemory()
-	rep, ok := r.snapshot()
-	if !ok {
-		r.Log.Info("waiting for complete pod and node lists")
-		return time.Time{}, nil
+	defer func() {
+		if errors.Is(err, errWaiting) { // logged where it was seen; the run just ends
+			err = nil
+		}
+	}()
+	rep, err := r.current()
+	if err != nil {
+		return time.Time{}, err
 	}
 	if why == OnChange && rep.ReportHash == r.acked {
 		return time.Time{}, nil
 	}
-	if at, err := r.sync(ctx, rep); err != nil || !at.IsZero() {
+	held, at, err := r.sync(ctx, rep)
+	if err != nil || !at.IsZero() {
 		return at, err
 	}
-	changed, err := r.buildNeeded(ctx, rep)
+	// The build round works from what runs now, not from what ran before the sync's retries.
+	fresh, err := r.current()
+	if err != nil {
+		return time.Time{}, err
+	}
+	changed, err := r.buildNeeded(ctx, held, fresh)
 	if err != nil {
 		return time.Time{}, err
 	}
 	if changed { // a status changed during the round: the report says so
-		if rep, ok = r.snapshot(); ok && rep.ReportHash != r.acked {
-			return r.send(ctx, rep)
+		if rep, ok := r.snapshot(); ok && rep.ReportHash != r.acked {
+			_, at, err := r.send(ctx, rep)
+			return at, err
 		}
 	}
 	return time.Time{}, nil
 }
 
 // sync brings the server to this report: a heartbeat when the hash is the acknowledged one (or nothing is acknowledged
-// yet), else the report.
-func (r *Runner) sync(ctx context.Context, rep Report) (time.Time, error) {
+// yet), else the report. It answers the report the server holds.
+func (r *Runner) sync(ctx context.Context, rep Report) (Report, time.Time, error) {
 	if rep.ReportHash == r.acked || r.acked == "" {
 		body, err := json.Marshal(HeartbeatFor(rep))
 		if err != nil {
-			return time.Time{}, err
+			return Report{}, time.Time{}, err
 		}
-		res, err := r.retrying(ctx, "heartbeat", func() (client.Result, error) { return r.Client.ClusterHeartbeat(ctx, body) })
+		// Each retry looks again first: once the cluster has changed, the heartbeat's hash is stale.
+		res, err := r.retrying(ctx, "heartbeat", func() error {
+			fresh, err := r.current()
+			if err == nil && fresh.ReportHash != rep.ReportHash {
+				rep, err = fresh, errStale
+			}
+			return err
+		}, func() (client.Result, error) { return r.Client.ClusterHeartbeat(ctx, body) })
+		if errors.Is(err, errStale) {
+			return r.send(ctx, rep)
+		}
 		if err != nil {
-			return time.Time{}, err
+			return Report{}, time.Time{}, err
 		}
 		if res.Status >= 200 && res.Status < 300 {
 			r.acked = rep.ReportHash
-			return time.Time{}, nil
+			return rep, time.Time{}, nil
 		}
 		if res.Status != http.StatusConflict {
-			return time.Time{}, r.outcome("heartbeat", res)
+			return Report{}, time.Time{}, r.outcome("heartbeat", res)
 		}
 		r.Log.Info("the server asks for the full report", "message", res.Message)
 		r.acked = ""
@@ -186,27 +225,31 @@ func (r *Runner) sync(ctx context.Context, rep Report) (time.Time, error) {
 	return r.send(ctx, rep)
 }
 
-// send sends the report, or says when the pacing allows it.
-func (r *Runner) send(ctx context.Context, rep Report) (time.Time, error) {
+// send sends the report, or says when the pacing allows it. Each retry sends a new snapshot, never one the cluster
+// has moved on from. It answers the report the server acknowledged.
+func (r *Runner) send(ctx context.Context, rep Report) (Report, time.Time, error) {
 	if !r.lastReport.IsZero() {
 		if next := r.lastReport.Add(ReportPacing); r.Now().Before(next) {
-			return next, nil
+			return Report{}, next, nil
 		}
 	}
-	body, err := json.Marshal(rep)
+	gz, err := gzipped(rep)
 	if err != nil {
-		return time.Time{}, err
+		return Report{}, time.Time{}, err
 	}
-	gz, err := report.Gzip(body)
+	res, err := r.retrying(ctx, "report", func() error {
+		fresh, err := r.current()
+		if err == nil {
+			rep = fresh
+			gz, err = gzipped(rep)
+		}
+		return err
+	}, func() (client.Result, error) { return r.Client.ClusterReport(ctx, gz) })
 	if err != nil {
-		return time.Time{}, err
-	}
-	res, err := r.retrying(ctx, "report", func() (client.Result, error) { return r.Client.ClusterReport(ctx, gz) })
-	if err != nil {
-		return time.Time{}, err
+		return Report{}, time.Time{}, err
 	}
 	if res.Status < 200 || res.Status >= 300 {
-		return time.Time{}, r.outcome("report", res)
+		return Report{}, time.Time{}, r.outcome("report", res)
 	}
 	r.acked, r.lastReport = rep.ReportHash, r.Now()
 	if res.URL != "" && res.URL != r.pageURL {
@@ -214,54 +257,48 @@ func (r *Runner) send(ctx context.Context, rep Report) (time.Time, error) {
 		r.Log.Info("this cluster on FlawRook", "url", res.URL)
 	}
 	r.Log.Info("report sent", "status", res.Status, "bytes", len(gz), "workloads", len(rep.Workloads), "images", len(rep.Images), "reportHash", rep.ReportHash)
-	return time.Time{}, nil
+	return rep, time.Time{}, nil
 }
 
-// buildNeeded asks which scannable images the workspace needs, then builds and uploads them. It answers whether any
-// image's status changed.
-func (r *Runner) buildNeeded(ctx context.Context, rep Report) (bool, error) {
+func gzipped(rep Report) ([]byte, error) {
+	body, err := json.Marshal(rep)
+	if err != nil {
+		return nil, err
+	}
+	return report.Gzip(body)
+}
+
+// buildNeeded asks which scannable images the workspace needs, then builds and uploads them. It asks only about the
+// images both the report the server holds and the fresh snapshot list: an image that stopped running isn't built,
+// and one the server's report doesn't list yet waits for the next report (its upload would get a 409). It answers
+// whether any image's status changed.
+func (r *Runner) buildNeeded(ctx context.Context, held, fresh Report) (bool, error) {
 	configChanged, warning := r.Images.Round()
 	if warning != "" {
 		r.Log.Warn(warning)
 	}
-	now := r.Now()
-	byKey := map[ImageKey]Image{}
+	var byKey map[ImageKey]Image
 	var ask []ImageKey
-	r.mu.Lock()
-	for _, img := range rep.Images {
-		if Classify(img).Status != "" {
-			continue // known without a request
-		}
-		if s := r.images[img.ImageKey]; s != nil {
-			due := !s.retryAt.IsZero() && !now.Before(s.retryAt)
-			if configChanged && s.status.Status == PrivateNoCredential {
-				due = true
-			}
-			if !due {
-				continue
-			}
-		}
-		byKey[img.ImageKey] = img
-		ask = append(ask, img.ImageKey)
-	}
-	r.mu.Unlock()
-	if len(ask) == 0 {
-		return false, nil
-	}
-	body, err := json.Marshal(Needed{Protocol: report.Protocol, Agent: r.Agent, Cluster: ID{r.info.ID}, Images: ask})
-	if err != nil {
-		return false, err
-	}
 	var res client.Result
+	var err error
 	for attempt := 0; ; attempt++ {
-		res, err = r.retrying(ctx, "images/needed", func() (client.Result, error) { return r.Client.ImagesNeeded(ctx, body) })
+		byKey, ask = r.toAsk(held, fresh, configChanged)
+		if len(ask) == 0 {
+			return false, nil
+		}
+		var body []byte
+		if body, err = json.Marshal(Needed{Protocol: report.Protocol, Agent: r.Agent, Cluster: ID{r.info.ID}, Images: ask}); err != nil {
+			return false, err
+		}
+		res, err = r.retrying(ctx, "images/needed", nil, func() (client.Result, error) { return r.Client.ImagesNeeded(ctx, body) })
 		if err != nil || res.Status != http.StatusConflict || attempt == 1 {
 			break
 		}
-		// The server has no entry for the cluster: the report, then the question again.
+		// The server has no entry for the cluster: the fresh snapshot's report, then the question again.
 		r.Log.Info("the server asks for the full report", "message", res.Message)
 		r.acked = ""
-		if at, err := r.send(ctx, rep); err != nil || !at.IsZero() {
+		var at time.Time
+		if held, at, err = r.send(ctx, fresh); err != nil || !at.IsZero() {
 			return false, err
 		}
 	}
@@ -318,12 +355,47 @@ func (r *Runner) buildNeeded(ctx context.Context, rep Report) (bool, error) {
 	return changed, nil
 }
 
+// toAsk is the images to ask about: those both reports list that need no request to be known, less the ones held
+// until a later try.
+func (r *Runner) toAsk(held, fresh Report, configChanged bool) (map[ImageKey]Image, []ImageKey) {
+	listed := map[ImageKey]bool{}
+	for _, img := range held.Images {
+		listed[img.ImageKey] = true
+	}
+	now := r.Now()
+	byKey := map[ImageKey]Image{}
+	var ask []ImageKey
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, img := range fresh.Images {
+		if !listed[img.ImageKey] {
+			continue // the server's report doesn't list it yet: the next report brings it
+		}
+		if Classify(img).Status != "" {
+			continue // known without a request
+		}
+		if s := r.images[img.ImageKey]; s != nil {
+			due := !s.retryAt.IsZero() && !now.Before(s.retryAt)
+			if configChanged && s.status.Status == PrivateNoCredential {
+				due = true
+			}
+			if !due {
+				continue
+			}
+		}
+		byKey[img.ImageKey] = img
+		ask = append(ask, img.ImageKey)
+	}
+	return byKey, ask
+}
+
 // buildOne resolves, builds and uploads one image; it answers whether the image's status changed.
 func (r *Runner) buildOne(ctx context.Context, img Image) bool {
 	ctx, cancel := context.WithTimeout(ctx, BuildTimeout)
 	defer cancel()
 	start := time.Now()
 	r.Log.Info("building", "ref", img.Ref, "digest", img.Digest, "platform", img.Platform)
+	memory := r.memory()
 	res, st := r.Images.Resolve(ctx, img)
 	if st == nil && res.SizeBytes > r.Config.MaxImageBytes() {
 		st = &Status{Status: TooLarge, Reason: "image", Detail: "larger than sbom_max_image_bytes; not pulled", SizeBytes: res.SizeBytes, LimitBytes: r.Config.MaxImageBytes()}
@@ -333,50 +405,62 @@ func (r *Runner) buildOne(ctx context.Context, img Image) bool {
 	if st == nil {
 		sbom, packages, st = r.Images.Build(ctx, img, res)
 	}
+	var why []any // a refused upload's answer
 	if st == nil {
-		st = r.upload(ctx, img, res, sbom)
+		st, why = r.upload(ctx, img, res, sbom)
 	}
-	r.Log.Info("built", append([]any{"ref", img.Ref, "platform", img.Platform, "packages", packages, "ms", time.Since(start).Milliseconds(),
-		"sizeBytes", res.SizeBytes, "sbomBytes", len(sbom), "status", statusText(st)}, r.memory()...)...)
+	mem := memory() // the build is over, whether it worked, failed or timed out
+	r.Log.Info("built", append(append([]any{"ref", img.Ref, "platform", img.Platform, "packages", packages, "ms", time.Since(start).Milliseconds(),
+		"sizeBytes", res.SizeBytes, "sbomBytes", len(sbom), "status", statusText(st)}, why...), mem...)...)
 	return r.record(img.ImageKey, st)
 }
 
-func (r *Runner) memory() []any {
+func (r *Runner) memory() func() []any {
 	if r.Memory == nil {
-		return nil
+		return func() []any { return nil }
 	}
 	return r.Memory()
 }
 
 // upload sends one SBOM. A transient failure (no answer, a 5xx) leaves the image as it was, tried at the next run.
-func (r *Runner) upload(ctx context.Context, img Image, res Resolved, sbom []byte) *Status {
+// When the server refused the SBOM or never answered, it also answers the built line's httpStatus and reason.
+func (r *Runner) upload(ctx context.Context, img Image, res Resolved, sbom []byte) (*Status, []any) {
 	if len(sbom) > MaxSBOMBytes {
-		return &Status{Status: TooLarge, Reason: "sbom", Detail: fmt.Sprintf("the SBOM is %d bytes, over the API's 20 MB", len(sbom))}
+		return &Status{Status: TooLarge, Reason: "sbom", Detail: fmt.Sprintf("the SBOM is %d bytes, over the API's 20 MB", len(sbom))}, nil
 	}
 	body, err := json.Marshal(Upload{Protocol: report.Protocol, Agent: r.Agent, Cluster: ID{r.info.ID}, SBOM: sbom, Image: UploadImage{
 		Digest: img.Digest, Platform: img.Platform, ManifestDigest: res.ManifestDigest, ResolvedPlatform: res.ResolvedPlatform, Ref: img.Ref, SizeBytes: res.SizeBytes}})
 	if err != nil {
-		return &Status{Status: Error, Reason: "upload-rejected", Detail: err.Error()}
+		return &Status{Status: Error, Reason: "upload-rejected", Detail: err.Error()}, nil
 	}
 	gz, err := report.Gzip(body)
 	if err != nil {
-		return &Status{Status: Error, Reason: "upload-rejected", Detail: err.Error()}
+		return &Status{Status: Error, Reason: "upload-rejected", Detail: err.Error()}, nil
 	}
-	ans, err := r.retrying(ctx, "sbom upload", func() (client.Result, error) { return r.Client.ImageSBOM(ctx, res.ManifestDigest, gz) })
+	ans, err := r.retrying(ctx, "sbom upload", nil, func() (client.Result, error) { return r.Client.ImageSBOM(ctx, res.ManifestDigest, gz) })
 	switch {
 	case err != nil:
 		r.Log.Warn("sbom not uploaded, tried again at the next run", "ref", img.Ref, "error", err)
-		return &Status{Status: Error, Reason: "upload-rejected", Detail: detail(err)}
+		return &Status{Status: Error, Reason: "upload-rejected", Detail: detail(err)}, httpAnswer(0, detail(err))
 	case ans.Status >= 200 && ans.Status < 300:
-		return nil
+		return nil, nil
 	case ans.Status == http.StatusRequestEntityTooLarge:
-		return &Status{Status: TooLarge, Reason: "sbom", Detail: "the API refused the SBOM as too large (413)"}
+		return &Status{Status: TooLarge, Reason: "sbom", Detail: "the API refused the SBOM as too large (413)"}, httpAnswer(ans.Status, ans.Message)
 	case ans.Status == http.StatusConflict:
 		r.acked = "" // the server's report doesn't list this image: the next run sends the report
-		return &Status{Status: Error, Reason: "upload-rejected", Detail: "the server's report doesn't list this image (409)"}
+		return &Status{Status: Error, Reason: "upload-rejected", Detail: "the server's report doesn't list this image (409)"}, httpAnswer(ans.Status, ans.Message)
 	default:
-		return &Status{Status: Error, Reason: "upload-rejected", Detail: fmt.Sprintf("%d %s", ans.Status, ans.Message)}
+		return &Status{Status: Error, Reason: "upload-rejected", Detail: fmt.Sprintf("%d %s", ans.Status, ans.Message)}, httpAnswer(ans.Status, ans.Message)
 	}
+}
+
+// httpAnswer is the built line's httpStatus (0: no answer) and reason (the server's message, or the error), cut at
+// 200 characters.
+func httpAnswer(status int, reason string) []any {
+	if r := []rune(reason); len(r) > 200 {
+		reason = string(r[:200])
+	}
+	return []any{"httpStatus", status, "reason", reason}
 }
 
 // record keeps an image's status and its next try; nil clears it. It answers whether the reported status changed.
@@ -430,8 +514,9 @@ func statusText(st *Status) string {
 	return st.Status + "/" + st.Reason
 }
 
-// retrying makes a request with the backoff on no answer, a 5xx or a 429, as server mode does.
-func (r *Runner) retrying(ctx context.Context, what string, do func() (client.Result, error)) (client.Result, error) {
+// retrying makes a request with the backoff on no answer, a 5xx or a 429, as server mode does. again, if set, runs
+// after each backoff sleep, before the request is made again; an error from it ends the retries.
+func (r *Runner) retrying(ctx context.Context, what string, again func() error, do func() (client.Result, error)) (client.Result, error) {
 	for attempt := 0; ; attempt++ {
 		res, err := do()
 		retry := err != nil || res.Status >= 500 || res.Status == http.StatusTooManyRequests
@@ -445,6 +530,11 @@ func (r *Runner) retrying(ctx context.Context, what string, do func() (client.Re
 		r.Log.Warn(what+" failed, retrying", "status", res.Status, "error", errText(err), "in", wait.Round(time.Second))
 		if err := r.Sleep(ctx, wait); err != nil {
 			return res, err
+		}
+		if again != nil {
+			if err := again(); err != nil {
+				return res, err
+			}
 		}
 	}
 }

@@ -22,9 +22,11 @@ namespaces:
   # Never these.
   exclude: []
 sbom:
-  # An image larger than this, in compressed bytes, is reported as too large and never pulled. Keep it under
-  # scratch.sizeLimit: the layers are written there while the image's SBOM is built. To be confirmed by measurement.
-  maxImageBytes: 1073741824
+  # An image larger than this, in compressed bytes, is reported as too large and never pulled: 300 MiB. Measured on
+  # one k3s VM (amd64), 2026-11-23, a build takes 3 to 4 times the image's compressed size in memory and about 5
+  # times in scratch. Raise this, limits.memory and scratch.sizeLimit together: see the README's Sizing, and
+  # presets/large-images.yaml for images up to 1 GiB.
+  maxImageBytes: 314572800
   # Images built at once, 1 to 4. Each one takes its layers' room in scratch.
   concurrency: 1
 
@@ -38,7 +40,9 @@ image:
   pullPolicy: IfNotPresent
 
 # The agent sets its Go memory limit (GOMEMLIMIT) itself, to 75% of limits.memory as its cgroup reports it, so
-# limits.memory must be set. All four are to be set from the first measurements on a real cluster.
+# limits.memory must be set. Measured on one k3s VM (amd64), 2026-11-23: an image of 360 MiB compressed (n8n,
+# 2,149 packages) took the whole 1Gi and 243 s at the 250m CPU limit; one of 220 MiB (eclipse-temurin:21-jdk) took
+# 905 MiB. The CPU limit sets the build time.
 resources:
   requests:
     cpu: 50m

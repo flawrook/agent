@@ -126,7 +126,7 @@ A misspelt key, or a value of the wrong kind, stops `helm install` with the sche
 | `clusterName` | | The cluster's name in FlawRook |
 | `interval` | `60m` | How often the agent reports, or sends a heartbeat when nothing changed: 10m to 24h. A change in the cluster is reported after a minute of quiet, at most every 5 minutes |
 | `namespaces.include`, `namespaces.exclude` | all, none | The namespaces whose workloads are reported, by exact name |
-| `sbom.maxImageBytes` | 1 GiB | An image larger than this, compressed, is reported as too large and never pulled. Keep it under `scratch.sizeLimit` |
+| `sbom.maxImageBytes` | 300 MiB | An image larger than this, compressed, is reported as too large and never pulled. See Sizing |
 | `sbom.concurrency` | 1 | Images pulled at once, 1 to 4; each takes its room in the scratch volume |
 | `scratch.sizeLimit` | `2Gi` | The scratch volume's cap, on the node's disk. The kubelet evicts the pod if it grows past this |
 | `resources` | requests 50m, 128Mi; limits 250m, 1Gi | `limits.memory` must be set: the agent's Go memory limit is 75% of it |
@@ -139,6 +139,63 @@ A misspelt key, or a value of the wrong kind, stops `helm install` with the sche
 | `rbac.create` | `true` | `false`: bind the read rules yourself (pods, nodes, namespaces: get, list, watch) |
 | `podSecurityContext`, `securityContext` | hardened, see above | |
 | `nodeSelector`, `tolerations`, `affinity`, `priorityClassName` | | Where the pod runs |
+
+## Sizing
+
+The defaults build images up to 300 MiB compressed. The agent pulls each image into the scratch volume and reads
+it in memory, so the cap, the memory limit and the scratch size go together.
+
+**What a build takes**, measured on one k3s VM (amd64), 2026-11-23:
+
+- memory is 3 to 4 times the image's compressed size, and scratch is about 5 times;
+- n8n, 360 MiB compressed and 2,149 packages, took the whole 1 GiB of memory and 1,759 MiB of scratch;
+- eclipse-temurin:21-jdk, 220 MiB compressed, took 905 MiB of memory and 704 MiB of scratch.
+
+**Size from the biggest image your cluster runs:**
+
+- `sbom.maxImageBytes`: at least its compressed size;
+- `resources.limits.memory`: about 4 times that, and never under 1Gi;
+- `scratch.sizeLimit`: about 5 times that, times `sbom.concurrency`.
+
+**Finding the biggest image.** An image over the cap shows on its cluster's page in FlawRook as not scanned,
+"larger than the 300 MiB limit". The agent's log gives each image's compressed size as `sizeBytes` on its `built`
+line. For any image, add up the sizes of the layers in its manifest for your nodes' platform, for example:
+
+```sh
+crane manifest --platform linux/amd64 <image> | jq '[.layers[].size] | add'
+```
+
+**Images up to 1 GiB.** The chart ships a preset for them, `presets/large-images.yaml`. Save it as
+`large-images.yaml`:
+
+```yaml
+# The largeImages preset, for images up to 1 GiB compressed. Give it as a second --values, after your own file.
+sbom:
+  maxImageBytes: 1073741824
+resources:
+  limits:
+    memory: 4Gi
+scratch:
+  sizeLimit: 6Gi
+```
+
+Give it as a second `--values`, after your own file:
+
+```sh
+helm install flawrook-agent "$CHART" --namespace flawrook --values flawrook-values.yaml --values large-images.yaml
+```
+
+The preset's three keys override the same keys in your file. To change one of them, add `--set`, or a third file
+after the preset. The preset keeps the 128Mi memory request.
+
+**CPU sets the build time.** n8n took 243 s at the 250m CPU limit.
+
+**What the requests reserve.** The pod requests 128Mi of memory, so the scheduler reserves only that. A node needs
+the free memory, up to `limits.memory`, while a large image builds.
+
+**The memory in the log.** Each `built` line carries `memBuildMaxMiB`, the highest of the pod's `memory.current`,
+read once a second while that image built. With `sbom.concurrency` over 1, it covers every build running at the
+same time. `memPeakMiB` is the pod's peak since it started.
 
 ## Private registries
 

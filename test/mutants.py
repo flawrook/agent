@@ -17,7 +17,8 @@
 
 Each mutant breaks one behaviour the tests must catch: the file is changed, its package's tests run in
 Docker (scripts/docker-go.sh), and the file is written back and checked by sha256, whatever happens.
-A chart mutant runs test/chart-test.sh instead (KUBECONFORM=skip; HELM=helm, if set, passes through).
+A chart mutant runs test/chart-test.sh instead (KUBECONFORM=skip; HELM=helm, if set, passes through), and a signature
+mutant the release gate's signature step alone, over dist/release from the gate's release step.
 Each no-op control must survive. Every line the unit-file test asserts also gets a mutant that removes it.
 
     test/mutants.py              all mutants, from apps/agent
@@ -133,10 +134,17 @@ M = [
  ('internal/cluster/runner.go', 'if err != nil || res.Status != http.StatusConflict || attempt == 1 {', 'if true {', './internal/cluster/', 'needed 409 not followed by the report'),
  ('internal/cluster/runner.go', 'case ans.Status == http.StatusRequestEntityTooLarge:', 'case false:', './internal/cluster/', "upload 413 isn't too-large"),
  ('internal/cluster/runner.go', 'if rep.ReportHash == r.acked || r.acked == "" {', 'if rep.ReportHash == r.acked {', './internal/cluster/', 'no heartbeat first'),
+ ('internal/cluster/runner.go', 'rep = fresh\n\t\t\tgz, err = gzipped(rep)', '_ = fresh', './internal/cluster/', 'a report retry resends the first body'),
+ ('internal/cluster/runner.go', 'changed, err := r.buildNeeded(ctx, held, fresh)', 'changed, err := r.buildNeeded(ctx, held, rep)\n\t_ = fresh', './internal/cluster/', "the build round on the run's first snapshot"),
+ ('internal/cluster/runner.go', 'if !listed[img.ImageKey] {', 'if false {', './internal/cluster/', "images the server's report doesn't list asked"),
+ ('internal/cluster/runner.go', 'if err == nil && fresh.ReportHash != rep.ReportHash {', 'if false {', './internal/cluster/', 'a stale heartbeat retried'),
+ ('internal/cluster/runner.go', 'st, why = r.upload(ctx, img, res, sbom)', 'st, _ = r.upload(ctx, img, res, sbom)', './internal/cluster/', "a refused upload's line without httpStatus and reason"),
  ('internal/cluster/builder.go', 'return n / 4 * 3', 'return n', './internal/cluster/', 'GOMEMLIMIT at the full limit'),
+ ('internal/cluster/builder.go', 'high = max(high, n)', 'high = n', './internal/cluster/', 'memBuildMaxMiB is the last sample'),
  ('internal/cluster/sbom.go', 'WithSources("oci-dir").WithAlias(source.Alias{Name: ref})', 'WithSources("oci-dir").WithAlias(source.Alias{Name: ref, Version: "x"})', './internal/cluster/', 'sbom version not the manifest digest'),
  ('internal/config/config.go', 'if err != nil || d < 10*time.Minute || d > 24*time.Hour {', 'if err != nil {', './internal/config/', 'interval unbounded'),
  ('internal/config/config.go', 'if c.SBOMConcurrency != 0 && (c.SBOMConcurrency < 1 || c.SBOMConcurrency > 4) {', 'if false {', './internal/config/', 'concurrency unbounded'),
+ ('internal/config/config.go', 'DefaultSBOMMaxImageBytes = 300 << 20', 'DefaultSBOMMaxImageBytes = 1 << 30', './internal/config/', 'the 1 GiB default'),
  ('internal/client/client.go', 'return c.postLimit(ctx, ImagesNeededPath, body, false, neededLimit)', 'return c.post(ctx, ImagesNeededPath, body, false)', './internal/client/', 'images/needed answer cut at 64 KiB'),
  ('internal/client/client.go', 'return c.post(ctx, ClusterReportPath, gz, true)', 'return c.post(ctx, ClusterReportPath, gz, false)', './internal/client/', 'cluster report without gzip header'),
  # The Helm chart: its promises, held by test/chart-test.sh.
@@ -173,6 +181,14 @@ M = [
  ("deploy/helm/flawrook-agent/values.schema.json", "\"oneOf\": [", "\"x-oneOf\": [", "chart", "chart: the schema without its token rule"),
  ("deploy/helm/flawrook-agent/values.schema.json", "\"pattern\": \"^https://", "\"pattern\": \"^https?://", "chart", "chart: the schema takes plain http"),
  ("deploy/helm/flawrook-agent/values.schema.json", "\"required\": [\"memory\"],", "\"required\": [],", "chart", "chart: the schema takes no memory limit"),
+ ("deploy/helm/flawrook-agent/values.yaml", "  maxImageBytes: 314572800\n", "  maxImageBytes: 1073741824\n", "chart", "chart: the 1 GiB default"),
+ ("deploy/helm/flawrook-agent/presets/large-images.yaml", "scratch:\n  sizeLimit: 6Gi\n", "", "chart", "chart: the preset without its scratch size"),
+ # The signing workflow's permissions, held by the release gate's signature step: id-token: write in any job.
+ (".github/workflows/release-sign.yml", "      contents: write # the release's new asset\n", "      contents: write # the release's new asset\n      id-token: write\n", "signature", "signature: id-token in sign"),
+ (".github/workflows/release-sign.yml", "      packages: write # the image and its signature on ghcr.io\n", "      packages: write # the image and its signature on ghcr.io\n      id-token: write\n", "signature", "signature: id-token in image"),
+ (".github/workflows/release-sign.yml", "      packages: write # the chart and its signature on ghcr.io\n", "      packages: write # the chart and its signature on ghcr.io\n      id-token: write\n", "signature", "signature: id-token in chart"),
+ (".github/workflows/release-sign.yml", "      contents: write # the edit that makes the release the latest\n", "      contents: write # the edit that makes the release the latest\n      id-token: write\n", "signature", "signature: id-token in latest"),
+ (".github/workflows/release-sign.yml", "          cosign-release: v2.6.0 # its signatures verify with cosign 2 and 3 alike\n", "          cosign-release: v2.5.0 # its signatures verify with cosign 2 and 3 alike\n", "signature", "signature: two cosign versions"),
 ]
 
 # One mutant per line the unit-file test asserts: removing any one must fail it.
@@ -199,6 +215,11 @@ for f, old, new, pkg, what in M:
         if pkg == "chart":
             r = subprocess.run(["test/chart-test.sh", os.path.join(A, "dist", "chart-mutant")], cwd=A, capture_output=True, text=True,
                                env={**os.environ, "KUBECONFORM": "skip"})
+        elif pkg == "signature":
+            if not os.path.exists(os.path.join(A, "dist", "release", "install.sh")):
+                sys.exit(f"mutant {what!r}: no dist/release/install.sh; run the release step first")
+            env = {k: v for k, v in os.environ.items() if k != "GATE_HEALTH_URL"}  # no second health watch
+            r = subprocess.run(["scripts/release-gate.sh", "mutant"], cwd=A, capture_output=True, text=True, env={**env, "GATE_STEPS": "signature"})
         else:
             r = subprocess.run(["scripts/docker-go.sh", "test", "-count=1", *pkg.split()], cwd=A, capture_output=True, text=True)
     finally:

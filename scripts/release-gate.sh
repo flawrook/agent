@@ -120,17 +120,36 @@ signature() { # release.sh signs nothing: install.sh carries the release key, an
   pinned=$(grep -cE '^ *- uses: [^@ ]+@[0-9a-f]{40} # v[0-9]+\.[0-9]+\.[0-9]+$' "$wf")
   if [ "$uses" = 0 ] || [ "$uses" != "$pinned" ]; then echo "$wf: $pinned of $uses actions pinned to a commit SHA"; return 1; fi
   grep -q '^ *- uses: sigstore/cosign-installer@' "$wf" || { echo "$wf doesn't install cosign with sigstore/cosign-installer"; return 1; }
-  cosign=$(sed -nE 's/^ *cosign-release: (v[0-9]+\.[0-9]+\.[0-9]+)( .*)?$/\1/p' "$wf")
+  cosign=$(sed -nE 's/^ *cosign-release: (v[0-9]+\.[0-9]+\.[0-9]+)( .*)?$/\1/p' "$wf" | sort -u) # one per job that installs it
   [ -n "$cosign" ] || { echo "$wf doesn't set cosign's version"; return 1; }
-  # The least it needs: no permission at the top, contents: write for its one job, the two cosign secrets only.
+  [ "$(printf '%s\n' "$cosign" | wc -l)" -eq 1 ] || { echo "$wf sets several cosign versions: $(printf '%s\n' "$cosign" | tr '\n' ' ')"; return 1; }
+  # The least it needs: no permission at the top, the two cosign secrets only, and each job exactly its own
+  # permissions: sign uploads the signature, image and chart push to ghcr.io, latest edits the release.
   secrets=$(grep -oE 'secrets\.[A-Za-z_]+' "$wf" | sort -u | tr '\n' ' ')
   [ "$secrets" = "secrets.COSIGN_PASSWORD secrets.COSIGN_PRIVATE_KEY " ] || { echo "$wf uses the secrets: $secrets"; return 1; }
   grep -q '^permissions: {}$' "$wf" || { echo "$wf grants permissions at the top"; return 1; }
-  if [ "$(grep -cE '^ +[a-z-]+: (read|write)( |$)' "$wf")" != 1 ] || ! grep -qE '^ +contents: write( |$)' "$wf"; then
-    echo "$wf: its job's permissions aren't contents: write alone"
+  # Each job with its permissions block, "job name=level …", in the file's order; an inline permissions: value shows
+  # as "permissions=<value>".
+  perms=$(awk '
+    /^jobs:$/ { in_jobs = 1; next }
+    in_jobs && /^[^ #]/ { in_jobs = 0 }
+    !in_jobs { next }
+    /^  [^ #][^:]*:$/ { if (job != "") print job; job = substr($1, 1, length($1) - 1); block = 0; next }
+    /^    permissions:/ {
+      v = $0; sub(/^    permissions: */, "", v); sub(/ *#.*/, "", v)
+      if (v == "") block = 1; else job = job " permissions=" v
+      next
+    }
+    block && /^      [^ #]/ { p = $0; sub(/ *#.*/, "", p); sub(/^ +/, "", p); sub(/: */, "=", p); job = job " " p; next }
+    block && !/^      / { block = 0 }
+    END { if (job != "") print job }' "$wf" | paste -sd'|' -)
+  want="sign contents=write|image contents=read packages=write|chart contents=read packages=write|latest contents=write"
+  levels=$(grep -cE '^ +[a-z-]+: (read|write|none)( |$)' "$wf") # one per line above: none hidden at another indent
+  if [ "$perms" != "$want" ] || [ "$levels" != 6 ]; then
+    echo "$wf: the jobs' permissions are \"$perms\" ($levels in all), not \"$want\""
     return 1
   fi
-  echo "install.sh carries the release key; $wf: $pinned actions pinned by SHA, cosign $cosign, contents: write only, the two cosign secrets only"
+  echo "install.sh carries the release key; $wf: $pinned actions pinned by SHA, cosign $cosign, the two cosign secrets only; permissions exactly sign contents: write, image and chart contents: read and packages: write, latest contents: write"
 }
 # shellcheck disable=SC2317
 artifacts() {

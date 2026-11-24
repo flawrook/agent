@@ -15,6 +15,7 @@
 package cluster
 
 import (
+	"bytes"
 	"compress/gzip"
 	"context"
 	"encoding/json"
@@ -26,6 +27,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -38,19 +40,20 @@ import (
 
 // flawrook answers the cluster routes as the contract says: a heartbeat is 204 when its hash is the stored one,
 // else 409; a report is stored (202); images/needed lists what the workspace holds no SBOM for; an upload is held.
-// Queued statuses answer first, per route.
+// Queued statuses answer first, per route, with the route's message in say; a queued 0 drops the connection unanswered.
 type flawrook struct {
 	mu       sync.Mutex
 	stored   string
 	held     map[string]bool // digest/platform
 	queue    map[string][]int
+	say      map[string]string
 	requests []string
 	bodies   map[string]map[string]any // the last body per route
 }
 
 func newFlawrook(t *testing.T) (*flawrook, *client.Client) {
 	t.Helper()
-	f := &flawrook{held: map[string]bool{}, queue: map[string][]int{}, bodies: map[string]map[string]any{}}
+	f := &flawrook{held: map[string]bool{}, queue: map[string][]int{}, say: map[string]string{}, bodies: map[string]map[string]any{}}
 	srv := httptest.NewTLSServer(http.HandlerFunc(f.serve))
 	t.Cleanup(srv.Close)
 	ca := filepath.Join(t.TempDir(), "ca.pem")
@@ -84,7 +87,16 @@ func (f *flawrook) serve(w http.ResponseWriter, r *http.Request) {
 	f.bodies[route] = body
 	if q := f.queue[route]; len(q) > 0 {
 		f.queue[route] = q[1:]
+		if q[0] == 0 {
+			if conn, _, err := w.(http.Hijacker).Hijack(); err == nil {
+				conn.Close()
+			}
+			return
+		}
 		w.WriteHeader(q[0])
+		if m := f.say[route]; m != "" {
+			fmt.Fprintf(w, `{"message":%q}`, m)
+		}
 		return
 	}
 	switch route {
@@ -129,11 +141,17 @@ type fakeSource struct {
 	pods     []kube.Pod
 	nodes    []kube.Node
 	complete bool
+	next     [][]kube.Pod // each State takes the first as the pods, while there are any
 }
 
-func (s *fakeSource) Start(context.Context)                  {}
-func (s *fakeSource) State() ([]kube.Pod, []kube.Node, bool) { return s.pods, s.nodes, s.complete }
-func (s *fakeSource) Changed() <-chan struct{}               { return nil }
+func (s *fakeSource) Start(context.Context) {}
+func (s *fakeSource) State() ([]kube.Pod, []kube.Node, bool) {
+	if len(s.next) > 0 {
+		s.pods, s.next = s.next[0], s.next[1:]
+	}
+	return s.pods, s.nodes, s.complete
+}
+func (s *fakeSource) Changed() <-chan struct{} { return nil }
 
 // fakeImages builds every image unless told a status for its digest.
 type fakeImages struct {
@@ -311,7 +329,7 @@ func TestTooLargeIsNotBuilt(t *testing.T) {
 		t.Fatal("a too-large image was built")
 	}
 	s := r.images[ImageKey{dA, "linux/arm64"}]
-	if s == nil || s.status.Status != TooLarge || s.status.Reason != "image" || s.status.SizeBytes != 2<<30 || s.status.LimitBytes != 1<<30 || !s.retryAt.IsZero() {
+	if s == nil || s.status.Status != TooLarge || s.status.Reason != "image" || s.status.SizeBytes != 2<<30 || s.status.LimitBytes != 300<<20 || !s.retryAt.IsZero() {
 		t.Fatalf("status %+v", s)
 	}
 }
@@ -386,8 +404,8 @@ func TestCgroupMemoryAndLimit(t *testing.T) {
 	write("memory.peak", "209715200\n")
 	write("memory.stat", "anon 104857600\nfile 52428800\nkernel 1\n")
 	write("memory.max", "1073741824\n")
-	got := fmt.Sprint(CgroupMemory(root)())
-	if got != "[memCurrentMiB 150 memPeakMiB 200 memAnonMiB 100 memFileMiB 50]" {
+	got := fmt.Sprint(CgroupMemory(root, time.Hour)()())
+	if got != "[memBuildMaxMiB 150 memCurrentMiB 150 memPeakMiB 200 memAnonMiB 100 memFileMiB 50]" {
 		t.Errorf("memory %s", got)
 	}
 	if n := MemoryLimit(root); n != 805306368 {
@@ -397,7 +415,200 @@ func TestCgroupMemoryAndLimit(t *testing.T) {
 	if n := MemoryLimit(root); n != 0 {
 		t.Errorf("unlimited gave %d", n)
 	}
-	if got := CgroupMemory(filepath.Join(root, "none"))(); len(got) != 0 {
+	if got := CgroupMemory(filepath.Join(root, "none"), time.Hour)()(); len(got) != 0 {
 		t.Errorf("no cgroup gave %v", got)
 	}
+}
+
+const dD = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+
+// logged gives the runner a log the test reads.
+func logged(r *Runner) *bytes.Buffer {
+	var b bytes.Buffer
+	r.Log = slog.New(slog.NewTextHandler(&b, nil))
+	return &b
+}
+
+// line is the first log line with this message.
+func line(t *testing.T, logs *bytes.Buffer, msg string) string {
+	t.Helper()
+	for _, l := range strings.Split(logs.String(), "\n") {
+		if l += " "; strings.Contains(l, " msg="+msg+" ") || strings.Contains(l, ` msg="`+msg+`" `) {
+			return strings.TrimSuffix(l, " ")
+		}
+	}
+	t.Fatalf("no %q line in:\n%s", msg, logs.String())
+	return ""
+}
+
+// asked is the digests the last images/needed asked about, sorted.
+func asked(f *flawrook) []string {
+	var out []string
+	for _, raw := range f.bodies["images/needed"]["images"].([]any) {
+		out = append(out, raw.(map[string]any)["digest"].(string))
+	}
+	sort.Strings(out)
+	return out
+}
+
+func images(t *testing.T, body map[string]any) string {
+	t.Helper()
+	var out []string
+	for _, raw := range body["images"].([]any) {
+		out = append(out, raw.(map[string]any)["digest"].(string))
+	}
+	return strings.Join(out, " ")
+}
+
+func TestAReportRetrySendsANewSnapshot(t *testing.T) {
+	src := webSource("docker.io/library/nginx@"+dA, "docker.io/library/redis@"+dB)
+	r, f, _ := newRunner(t, src, &fakeImages{})
+	logs := logged(r)
+	r.Backoff = []time.Duration{time.Second, time.Second, time.Second}
+	sleeps := 0
+	r.Sleep = func(context.Context, time.Duration) error {
+		if sleeps++; sleeps == 1 {
+			src.pods = src.pods[:1] // redis is removed during the first backoff
+		}
+		return nil
+	}
+	f.queue["report"] = []int{503, 503}
+	if _, err := r.Cycle(context.Background(), OnInterval); err != nil {
+		t.Fatal(err)
+	}
+	equal(t, f.take(), "heartbeat", "report", "report", "report", "images/needed", "sbom")
+	sent := f.bodies["report"] // the body that got the 202
+	if got := images(t, sent); got != dA || len(sent["workloads"].([]any)) != 1 {
+		t.Fatalf("the report that got through lists %s and %d workloads", got, len(sent["workloads"].([]any)))
+	}
+	if r.acked != sent["reportHash"] || f.stored != r.acked {
+		t.Fatalf("acked %s, the body's hash %v", r.acked, sent["reportHash"])
+	}
+	if l := line(t, logs, "report sent"); !strings.Contains(l, " status=202 ") || !strings.HasSuffix(l, " workloads=1 images=1 reportHash="+r.acked) {
+		t.Fatalf("report line %s", l)
+	}
+}
+
+func TestARetriedSyncBuildsOnlyWhatBothListsHold(t *testing.T) {
+	a, b, c := "docker.io/library/nginx@"+dA, "docker.io/library/redis@"+dB, "docker.io/library/httpd@"+dC
+	src := webSource(a, b)
+	// The run's start sees A and B, the retry A, B and C; C got through in the report, and B stopped just after.
+	src.next = [][]kube.Pod{webSource(a, b).pods, webSource(a, b, c).pods, webSource(a, c).pods}
+	r, f, _ := newRunner(t, src, &fakeImages{})
+	r.Backoff = []time.Duration{time.Second}
+	f.queue["report"] = []int{503}
+	if _, err := r.Cycle(context.Background(), OnInterval); err != nil {
+		t.Fatal(err)
+	}
+	equal(t, f.take(), "heartbeat", "report", "report", "images/needed", "sbom", "sbom")
+	if got := images(t, f.bodies["report"]); got != dA+" "+dB+" "+dC {
+		t.Fatalf("the report lists %s", got)
+	}
+	if got := asked(f); strings.Join(got, " ") != dA+" "+dC {
+		t.Fatalf("asked about %v: want the images the report holds that still run", got)
+	}
+}
+
+func TestAnImageTheReportDoesntListWaitsForTheNextReport(t *testing.T) {
+	a, d := "docker.io/library/nginx@"+dA, "docker.io/library/postgres@"+dD
+	src := webSource(a)
+	// D starts while the attempt that gets through is on its way: the build round sees it, the server's report doesn't.
+	src.next = [][]kube.Pod{webSource(a).pods, webSource(a).pods, webSource(a, d).pods}
+	r, f, clk := newRunner(t, src, &fakeImages{})
+	r.Backoff = []time.Duration{time.Second}
+	f.queue["report"] = []int{503}
+	if _, err := r.Cycle(context.Background(), OnInterval); err != nil {
+		t.Fatal(err)
+	}
+	equal(t, f.take(), "heartbeat", "report", "report", "images/needed", "sbom")
+	if got := asked(f); strings.Join(got, " ") != dA {
+		t.Fatalf("asked about %v in the run that didn't report D", got)
+	}
+	// The change's run, once the pacing allows: the report lists D, then D is asked about and built.
+	clk.t = clk.t.Add(ReportPacing)
+	if _, err := r.Cycle(context.Background(), OnChange); err != nil {
+		t.Fatal(err)
+	}
+	equal(t, f.take(), "report", "images/needed", "sbom")
+	if got := asked(f); !strings.Contains(strings.Join(got, " "), dD) {
+		t.Fatalf("asked about %v after the report", got)
+	}
+}
+
+func TestAStaleHeartbeatSendsTheReport(t *testing.T) {
+	a, b := "docker.io/library/nginx@"+dA, "docker.io/library/redis@"+dB
+	// The first run, nothing acknowledged: the heartbeat is a probe, and once B has started it's stale.
+	src := webSource(a)
+	r, f, clk := newRunner(t, src, &fakeImages{})
+	r.Backoff = []time.Duration{time.Second}
+	r.Sleep = func(context.Context, time.Duration) error { src.pods = webSource(a, b).pods; return nil }
+	f.queue["heartbeat"] = []int{503}
+	if _, err := r.Cycle(context.Background(), OnInterval); err != nil {
+		t.Fatal(err)
+	}
+	equal(t, f.take(), "heartbeat", "report", "images/needed", "sbom", "sbom")
+	if got := images(t, f.bodies["report"]); got != dA+" "+dB {
+		t.Fatalf("the report lists %s", got)
+	}
+
+	// Acknowledged a minute ago: the change's report waits for the pacing.
+	clk.t = clk.t.Add(time.Minute)
+	r.Sleep = func(context.Context, time.Duration) error { src.pods = webSource(a).pods; return nil }
+	f.queue["heartbeat"] = []int{503}
+	at, err := r.Cycle(context.Background(), OnInterval)
+	if err != nil || !at.Equal(clk.t.Add(4*time.Minute)) {
+		t.Fatalf("retry at %v (%v), want %v", at, err, clk.t.Add(4*time.Minute))
+	}
+	equal(t, f.take(), "heartbeat")
+}
+
+func TestARefusedUploadsBuiltLineSaysWhy(t *testing.T) {
+	long := strings.Repeat("x", 300)
+	for _, tc := range []struct {
+		code    int
+		message string
+		want    string // the line's end
+	}{
+		{409, "report required", ` status=error/upload-rejected httpStatus=409 reason="report required"`},
+		{413, "body over the limit", ` status=too-large/sbom httpStatus=413 reason="body over the limit"`},
+		{400, long, ` status=error/upload-rejected httpStatus=400 reason=` + long[:200]},
+		{0, "", ` status=error/upload-rejected httpStatus=0 reason=`},
+		{202, "", ` status=uploaded`},
+	} {
+		r, f, _ := newRunner(t, webSource("docker.io/library/nginx@"+dA), &fakeImages{})
+		logs := logged(r)
+		if tc.code != 202 {
+			f.queue["sbom"], f.say["sbom"] = []int{tc.code}, tc.message
+		}
+		if _, err := r.Cycle(context.Background(), OnInterval); err != nil {
+			t.Fatal(err)
+		}
+		l := line(t, logs, "built")
+		switch {
+		case tc.code == 0: // no answer: the error, which names the request
+			if _, reason, _ := strings.Cut(l, tc.want); !strings.Contains(l, tc.want) || !strings.Contains(reason, "/sbom") || len([]rune(reason)) > 200+2 {
+				t.Errorf("no answer: %s", l)
+			}
+		case !strings.HasSuffix(l, tc.want):
+			t.Errorf("%d: %s", tc.code, l)
+		}
+		if tc.code == 202 && strings.Contains(l, "httpStatus") {
+			t.Errorf("an upload that worked: %s", l)
+		}
+	}
+}
+
+func TestARetryOnIncompleteListsEndsTheRun(t *testing.T) {
+	src := webSource("docker.io/library/nginx@" + dA)
+	r, f, _ := newRunner(t, src, &fakeImages{})
+	logs := logged(r)
+	r.Backoff = []time.Duration{time.Second, time.Second}
+	r.Sleep = func(context.Context, time.Duration) error { src.complete = false; return nil } // a watch restarts
+	f.queue["report"] = []int{503}
+	at, err := r.Cycle(context.Background(), OnInterval)
+	if err != nil || !at.IsZero() || r.acked != "" {
+		t.Fatalf("retry at %v, %v, acked %q", at, err, r.acked)
+	}
+	equal(t, f.take(), "heartbeat", "report")
+	line(t, logs, "waiting for complete pod and node lists")
 }

@@ -1,0 +1,4 @@
+# Given after presets/large-images.yaml: a file after the preset changes one of its keys.
+resources:
+  limits:
+    memory: 8Gi

@@ -244,7 +244,7 @@ func TestClusterDefaultsAndServerMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Cluster() || c.RunInterval() != time.Hour || c.MaxImageBytes() != 1<<30 || c.Concurrency() != 1 {
+	if c.Cluster() || c.RunInterval() != time.Hour || c.MaxImageBytes() != 300<<20 || c.Concurrency() != 1 {
 		t.Fatalf("defaults: %+v", c)
 	}
 	c, err = Load(Sources{Env: env(map[string]string{"FLAWROOK_MODE": "server"}), Path: filepath.Join(t.TempDir(), "none.yaml")})
