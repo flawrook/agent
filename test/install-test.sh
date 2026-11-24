@@ -32,7 +32,9 @@
 #    The service starts exactly once per install (the journal's count): a fresh install with a token, the
 #    same package again over the running agent, an upgrade to the next patch version (the same binary,
 #    repacked), and none at all without a token. An upgrade from 0.1.0 as released (its 0700 and 0600 modes,
-#    its capability) leaves the agent reporting with the new modes and no capability. The systemd floor, with a fake systemctl --version: on 219, or a version it can't
+#    its capability) leaves the agent reporting with the new modes and no capability. An upgrade from 0.2.0 as
+#    released (the flawrook group's modes already) keeps them, starts the agent once more and reports again.
+#    The systemd floor, with a fake systemctl --version: on 219, or a version it can't
 #    read, install.sh refuses and changes nothing; on 219 the deb by itself installs its files but neither
 #    enables nor starts the service; on 235 install.sh installs and starts it. With systemd 219 installed but
 #    not running, install.sh refuses as well, and the deb by itself enables nothing. A systemd that ignores
@@ -46,8 +48,8 @@
 #    doesn't know @system-service: with the sets and calls the unit lists besides, the service starts, reports,
 #    heartbeats, lives through a reload and a token rotation, and is never stopped with SIGSYS.
 # Usage: test/install-test.sh [out-dir]
-# PREBUILT=1 uses dist/stub-linux-<arch> as it is, without building. The 0.1.0 release comes from GitHub
-# (PREVIOUS_URL), checked against its checksums.txt. Every container is memory-capped.
+# PREBUILT=1 uses dist/stub-linux-<arch> as it is, without building. The 0.1.0 and 0.2.0 releases come from GitHub
+# (PREVIOUS_URL and PREVIOUS_020_URL), each checked against its checksums.txt. Every container is memory-capped.
 set -eu
 cd "$(dirname "$0")/.."
 OUT=${1:-$PWD/dist/install-test}
@@ -96,12 +98,17 @@ if [ ! -s "$OUT/releases/signed/checksums.txt.sig" ] || [ ! -s "$OUT/releases/ba
 id=$(docker create "$COSIGN_IMAGE")
 docker cp "$id:/ko-app/cosign" "$OUT/cosign" >/dev/null
 docker rm "$id" >/dev/null
-# 0.1.0 as released, for the upgrade from its modes and its capability.
+# 0.1.0 and 0.2.0 as released, for the upgrades from their modes and 0.1.0's capability.
 PREVIOUS_URL=${PREVIOUS_URL:-https://github.com/flawrook/agent/releases/download/v0.1.0}
-mkdir -p "$OUT/releases/v010"
-for f in checksums.txt install.sh "flawrook-agent-$ARCH.deb"; do curl -fsSL -o "$OUT/releases/v010/$f" "$PREVIOUS_URL/$f"; done
-(cd "$OUT/releases/v010" && grep -E "  (install\.sh|flawrook-agent-$ARCH\.deb)\$" checksums.txt | shasum -a 256 -c - >/dev/null) ||
-  { echo "0.1.0 from $PREVIOUS_URL doesn't match its checksums.txt"; exit 1; }
+PREVIOUS_020_URL=${PREVIOUS_020_URL:-https://github.com/flawrook/agent/releases/download/v0.2.0}
+for previous in "0.1.0 $PREVIOUS_URL" "0.2.0 $PREVIOUS_020_URL"; do
+  v=${previous%% *} url=${previous#* }
+  dir=$OUT/releases/v$(echo "$v" | tr -d .)
+  mkdir -p "$dir"
+  for f in checksums.txt install.sh "flawrook-agent-$ARCH.deb"; do curl -fsSL -o "$dir/$f" "$url/$f"; done
+  (cd "$dir" && grep -E "  (install\.sh|flawrook-agent-$ARCH\.deb)\$" checksums.txt | shasum -a 256 -c - >/dev/null) ||
+    { echo "$v from $url doesn't match its checksums.txt"; exit 1; }
+done
 # Upgrades: the same binary as the next patch version's deb and rpm, with its install.sh and checksums.txt, as
 # release.sh makes them (unsigned: these hosts have no cosign); and as the one after that's rpm, for rpm alone.
 mkdir -p "$OUT/upgrade-src/dist/pkg" "$OUT/releases/direct"
@@ -133,7 +140,7 @@ fi
 
 # shellcheck disable=SC2317 # run by the trap
 cleanup() {
-  docker stop -t 2 "$NET-stub" "$NET-systemd" "$NET-from010" "$NET-rocky" "$NET-bionic" >/dev/null 2>&1 || true
+  docker stop -t 2 "$NET-stub" "$NET-systemd" "$NET-from010" "$NET-from020" "$NET-rocky" "$NET-bionic" >/dev/null 2>&1 || true
   docker network rm "$NET" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
@@ -468,6 +475,35 @@ i=0
 until [ "$(reported it-from010 report "${T1#"${T1%????}"}")" -ge 2 ]; do i=$((i + 1)); [ $i -lt 100 ] || break; sleep 1; done
 check "it read the token and reported again" "$(reported it-from010 report "${T1#"${T1%????}"}")" "2"
 docker stop -t 2 "$NET-from010" >/dev/null
+
+echo "an upgrade from 0.2.0 as released: the flawrook group's modes, no capability, then this release's install.sh"
+docker run -d --rm --name "$NET-from020" --network "$NET" --hostname it-from020 --privileged --cgroupns=host --memory 1g \
+  -v /sys/fs/cgroup:/sys/fs/cgroup:rw --tmpfs /run --tmpfs /run/lock \
+  -v "$PWD/dist/release/install.sh:/install.sh:ro" -v "$OUT/stub/ca.pem:/ca.pem:ro" flawrook-agent-test-systemd >/dev/null
+was020() { docker exec "$NET-from020" sh -c "$1"; }
+i=0
+until was020 'systemctl is-system-running 2>/dev/null' | grep -Eq '^(running|degraded)$'; do i=$((i + 1)); [ $i -lt 60 ] || { echo "systemd didn't boot"; exit 1; }; sleep 1; done
+was020 "install -d -m 0700 /etc/flawrook && install -m 0600 /dev/null /etc/flawrook/agent.yaml && install -m 0600 /ca.pem /etc/flawrook/ca.pem
+    printf 'url: https://stub:8443\ntoken: $T1\nca_file: /etc/flawrook/ca.pem\n' >/etc/flawrook/agent.yaml
+    curl -fsSL http://releases:8080/v020/install.sh | FLAWROOK_RELEASE_URL=http://releases:8080/v020 sh" >"$OUT/from020-install.txt" 2>&1
+pid=$(was020 'systemctl show -p MainPID --value flawrook-agent')
+check "0.2.0 runs, with no capability" "$(was020 "flawrook-agent --version | cut -d' ' -f2; sed -n 's/^CapEff:[[:space:]]*//p' /proc/$pid/status" | tr '\n' ' ')" "0.2.0 0000000000000000 "
+check "0.2.0's modes" "$(was020 "stat -c '%a %U %G' /etc/flawrook /etc/flawrook/agent.yaml /etc/flawrook/ca.pem" | tr '\n' ' ')" "750 root flawrook 640 root flawrook 640 root flawrook "
+i=0
+until [ "$(reported it-from020 report "${T1#"${T1%????}"}")" -ge 1 ]; do i=$((i + 1)); [ $i -lt 100 ] || break; sleep 1; done
+check "0.2.0 reported" "$(reported it-from020 report "${T1#"${T1%????}"}")" "1"
+before=$(starts "$NET-from020")
+was020 "FLAWROOK_RELEASE_URL=http://releases:8080/good sh /install.sh" >"$OUT/from020-upgrade.txt" 2>&1
+pid=$(was020 'systemctl show -p MainPID --value flawrook-agent')
+check "upgraded" "$(was020 "dpkg-query -W -f '\${Version}' flawrook-agent")" "$REL"
+check "started once more (the journal)" "$(($(starts "$NET-from020") - before))" "1"
+check "the modes kept" "$(was020 "stat -c '%a %U %G' /etc/flawrook /etc/flawrook/agent.yaml /etc/flawrook/ca.pem" | tr '\n' ' ')" "750 root flawrook 640 root flawrook 640 root flawrook "
+check "no capability" "$(was020 "sed -n 's/^CapEff:[[:space:]]*//p' /proc/$pid/status")" "0000000000000000"
+# The agent's version is in the report's hash, so the upgraded agent sends a report, not a heartbeat.
+i=0
+until [ "$(reported it-from020 report "${T1#"${T1%????}"}")" -ge 2 ]; do i=$((i + 1)); [ $i -lt 100 ] || break; sleep 1; done
+check "it read the token and reported again" "$(reported it-from020 report "${T1#"${T1%????}"}")" "2"
+docker stop -t 2 "$NET-from020" >/dev/null
 
 echo "systemd 219 installed but not running (a chroot, an image build)"
 result=$(docker run --rm --network "$NET" --memory 512m -v "$OUT/fake:/fake:ro" -v "$PWD/dist/release/install.sh:/install.sh:ro" \

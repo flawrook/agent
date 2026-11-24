@@ -16,6 +16,8 @@
 # The release gate in one pass: every check a public release needs, each with its log under
 # dist/gate/<version>-<UTC time>/, and SUMMARY.txt with PASS or FAIL, the time and the key numbers per step.
 #   scripts/release-gate.sh 0.1.0
+# The version is a plain release number, never a pre-release with a "-" (0.3.0-rc1): nfpm writes the "-" as "~" in
+# the deb's and the rpm's version, and install-test compares the installed version with this one literally.
 # Docker only. Heavy: it builds both architectures and runs the install test (systemd in a privileged
 # container), the integration test (four distribution containers), the network proof and the mutation
 # check, and checks the Helm chart (test/chart-test.sh) and the container image (test/image-test.sh). Run it
@@ -78,7 +80,7 @@ note() {
     unit-caps) grep -c '^--- PASS' "$log" | sed 's/$/ unit test passed; the built unit equals packaging\/flawrook-agent.service/' ;;
     install-test) echo "$(grep -c '  ok ' "$log") ok, $(grep -c 'FAIL' "$log") failed; $(grep -o 'exposure level[^:]*: [0-9.]* [A-Z]*' "$log")" ;;
     integration) grep -E '^[a-z0-9-]+: reports=' "$log" | sed -E 's/ maxRssKiB.*//' | tr '\n' ';' ;;
-    network-proof) grep -E '^(dry-run|direct|proxy):' "$log" | cut -d';' -f1 | tr '\n' ';' ;;
+    network-proof) grep -E '^(dry-run|direct|proxy|sbom):' "$log" | cut -d';' -f1 | tr '\n' ';' ;;
     mutants) tail -1 "$log" ;;
     chart) tail -1 "$log" ;;
     image) tail -1 "$log" ;;
