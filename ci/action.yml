@@ -1,0 +1,106 @@
+# FlawRook's image check for GitHub Actions: https://flawrook.dev/docs/ci-api
+#
+#   - run: docker buildx build -t "$IMAGE" -o type=oci,dest=image.tar .
+#   - uses: flawrook/agent/ci@v1
+#     with:
+#       token: ${{ secrets.FLAWROOK_TOKEN }}
+#
+# A step for the job that builds the image, after it saves the image as an archive. It makes the archive's SBOM with
+# the FlawRook agent (the release pinned below, checked against its sha256) and sends it. It fails the job when the
+# image brings a new finding at the priorities `fail-on` names (P1 or P2 by default), or when the downloaded agent
+# doesn't match its sha256; anything else (no token, an archive the agent can't read, no answer from FlawRook, an
+# image's first run) leaves a warning. The answer is saved as flawrook.json.
+name: FlawRook image check
+description: Checks a built image with FlawRook and fails on a new finding at the priorities fail-on names.
+inputs:
+  token:
+    description: A workspace CI token, from a repository secret such as FLAWROOK_TOKEN.
+    required: false
+    default: ""
+  archive:
+    description: The image archive the job saved (an OCI or Docker archive, or an OCI layout directory).
+    default: image.tar
+  image:
+    description: The name FlawRook keeps the image under, without a tag. Empty, ghcr.io/<owner>/<repository> in lower case.
+    default: ""
+  flawrook-url:
+    description: The FlawRook to ask, when it isn't flawrook.dev.
+    default: https://flawrook.dev
+  fail-on:
+    description: "The priorities of the new findings that fail the job: p1,p2 (the default), p1, p1,p2,p3, or none to report only. Any other value fails the job."
+    default: p1,p2
+  agent-version:
+    description: The agent release that makes the SBOM. Change it together with the two checksums.
+    default: "0.3.1"
+  agent-sha256-amd64:
+    description: The linux-amd64 binary's sha256, from that release's checksums.txt.
+    default: "63e4877a3160273256ca3c3f656800960c569fb757d1ac058de02d78c79799b6"
+  agent-sha256-arm64:
+    description: The linux-arm64 binary's sha256, from that release's checksums.txt.
+    default: "f824763a7ef7164017c8e15aec9fe0c4f212e84158690925e9c9b164d630b3f8"
+runs:
+  using: composite
+  steps:
+    - name: Check the image with FlawRook
+      shell: bash
+      env:
+        FLAWROOK_TOKEN: ${{ inputs.token }}
+        FLAWROOK_URL: ${{ inputs.flawrook-url }}
+        FLAWROOK_FAIL_ON: ${{ inputs.fail-on }}
+        ARCHIVE: ${{ inputs.archive }}
+        IMAGE: ${{ inputs.image }}
+        VERSION: ${{ inputs.agent-version }}
+        SHA_AMD64: ${{ inputs.agent-sha256-amd64 }}
+        SHA_ARM64: ${{ inputs.agent-sha256-arm64 }}
+        DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      run: |
+        # What fails the job: fail-on names the new findings' priorities that do, as FLAWROOK_FAIL_ON does in FlawRook's
+        # GitLab template. flawrook_fail_on reads it (or fails on a value it doesn't know); flawrook_new counts an
+        # answer's new findings at those priorities; flawrook_fails says whether that count fails the job.
+        flawrook_fail_on() {
+          case "${FLAWROOK_FAIL_ON:-p1,p2}" in
+            p1) flawrook_keys=p1 flawrook_words=P1 flawrook_report_only= ;;
+            p1,p2) flawrook_keys="p1 p2" flawrook_words="P1 or P2" flawrook_report_only= ;;
+            p1,p2,p3) flawrook_keys="p1 p2 p3" flawrook_words="P1, P2 or P3" flawrook_report_only= ;;
+            none) flawrook_keys="p1 p2" flawrook_words="P1 or P2" flawrook_report_only=1 ;;
+            *) echo "::error::FlawRook: fail-on is \"$FLAWROOK_FAIL_ON\"; use p1,p2 (the default), p1, p1,p2,p3 or none"; return 1 ;;
+          esac
+        }
+        flawrook_new() { jq -r --arg k "$flawrook_keys" '[.summary.new[($k | split(" "))[]]] | add' "$1" || :; }
+        flawrook_fails() { [ -z "$flawrook_report_only" ] && [ "$1" != 0 ]; }
+        flawrook_fail_on || exit 1
+        image=${IMAGE:-ghcr.io/${GITHUB_REPOSITORY,,}}
+        skip() { echo "::warning::FlawRook: $image was not checked: $1"; exit 0; }
+        [ -n "$FLAWROOK_TOKEN" ] || skip "FLAWROOK_TOKEN is not set"
+        case "$RUNNER_ARCH" in X64) arch=amd64 sha=$SHA_AMD64 ;; ARM64) arch=arm64 sha=$SHA_ARM64 ;; *) skip "no agent for an $RUNNER_ARCH runner" ;; esac
+        agent=$RUNNER_TEMP/flawrook-agent-$VERSION-$arch
+        curl -fsSLo "$agent.part" "https://github.com/flawrook/agent/releases/download/v$VERSION/flawrook-agent-linux-$arch" ||
+          { rm -f "$agent.part"; skip "the agent could not be downloaded"; }
+        echo "$sha  $agent.part" | sha256sum -c - >/dev/null 2>&1 ||
+          { rm -f "$agent.part"; echo "::error::FlawRook: the downloaded flawrook-agent does not match its sha256"; exit 1; }
+        chmod +x "$agent.part" && mv "$agent.part" "$agent"
+        rc=0
+        "$agent" sbom "$ARCHIVE" --out sbom.json --max-image-bytes 1073741824 2>agent.err || rc=$?
+        [ "$rc" = 0 ] || skip "flawrook-agent exit $rc: $(cat agent.err)"
+        jq -cn --arg repo "${GITHUB_SERVER_URL#https://}/$GITHUB_REPOSITORY" --arg ref "${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}" \
+          --arg commit "$HEAD_SHA" --arg default_branch "$DEFAULT_BRANCH" \
+          --arg image "$image" --arg tag "${HEAD_SHA::12}" --slurpfile sbom sbom.json \
+          '{repo: $repo, ref: $ref, commit: $commit, default_branch: $default_branch, image: $image, tag: $tag, sbom: $sbom[0]}' |
+          gzip > body.json.gz
+        code=$(curl -sS -m 600 -o flawrook.json -w '%{http_code}' "$FLAWROOK_URL/api/v1/ci/images" \
+          -H "Authorization: Bearer $FLAWROOK_TOKEN" -H "Content-Type: application/json" \
+          -H "Content-Encoding: gzip" --data-binary @body.json.gz) || code=000
+        rm -f sbom.json body.json.gz agent.err
+        [ "$code" = 200 ] ||
+          skip "$([ "$code" = 000 ] && echo "no connection" || echo "HTTP $code $(jq -r '.message // empty' flawrook.json 2>/dev/null | head -c 160)")"
+        new=$(flawrook_new flawrook.json 2>/dev/null)
+        case "$new" in '' | *[!0-9]*) skip "the answer could not be read" ;; esac
+        link=$(jq -r '.url // empty' flawrook.json)
+        if [ "$(jq -r '.baseline == null' flawrook.json)" = true ]; then
+          echo "::warning::FlawRook: first run of $image, nothing to compare with yet: $new $flawrook_words finding(s) in the image${link:+ · $link}"
+          exit 0
+        fi
+        if flawrook_fails "$new"; then echo "::error::FlawRook: $image brings $new new $flawrook_words finding(s)${link:+ · $link}"; exit 1; fi
+        [ "$new" = 0 ] || { echo "::warning::FlawRook: $image brings $new new $flawrook_words finding(s)${link:+ · $link}; fail-on is none, so the job goes on"; exit 0; }
+        echo "FlawRook: no new $flawrook_words findings in $image${link:+ · $link}"

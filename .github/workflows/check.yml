@@ -1,0 +1,129 @@
+# FlawRook's check for GitHub Actions, as a reusable workflow: https://flawrook.dev/docs/ci-api
+#
+#   on:
+#     push:
+#       branches: [main]
+#     pull_request:
+#   jobs:
+#     flawrook:
+#       uses: flawrook/agent/.github/workflows/check.yml@v1
+#       secrets:
+#         FLAWROOK_TOKEN: ${{ secrets.FLAWROOK_TOKEN }}
+#
+# FLAWROOK_TOKEN is a workspace CI token, stored as a repository secret. For a repository connected to FlawRook,
+# FlawRook reads the commit itself; for any other, name the files to send with `with: files: <paths>`. The job fails
+# when the change brings a new finding at the priorities `fail-on` names (P1 or P2 by default), and ends with a
+# warning when FlawRook can't be reached, refuses the request or sends an answer the job can't read. To check a built
+# image, use the image step, flawrook/agent/ci@v1, in the job that builds it.
+name: FlawRook check
+on:
+  workflow_call:
+    inputs:
+      files:
+        description: Space-separated paths of the files to send. Empty, FlawRook reads the connected repository at the commit.
+        type: string
+        default: ""
+      flawrook-url:
+        description: The FlawRook to ask, when it isn't flawrook.dev.
+        type: string
+        default: https://flawrook.dev
+      fail-on:
+        description: "The priorities of the new findings that fail the job: p1,p2 (the default), p1, p1,p2,p3, or none to report only. Any other value fails the job."
+        type: string
+        default: p1,p2
+    secrets:
+      FLAWROOK_TOKEN:
+        required: false
+permissions:
+  contents: read
+jobs:
+  flawrook:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        if: inputs.files != ''
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Ask FlawRook to check this change
+        shell: bash
+        env:
+          FLAWROOK_TOKEN: ${{ secrets.FLAWROOK_TOKEN }}
+          FLAWROOK_URL: ${{ inputs.flawrook-url }}
+          FLAWROOK_FILES: ${{ inputs.files }}
+          FLAWROOK_FAIL_ON: ${{ inputs.fail-on }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          # What fails the job: fail-on names the new findings' priorities that do, as FLAWROOK_FAIL_ON does in FlawRook's
+          # GitLab template. flawrook_fail_on reads it (or fails on a value it doesn't know); flawrook_new counts an
+          # answer's new findings at those priorities; flawrook_fails says whether that count fails the job.
+          flawrook_fail_on() {
+            case "${FLAWROOK_FAIL_ON:-p1,p2}" in
+              p1) flawrook_keys=p1 flawrook_words=P1 flawrook_report_only= ;;
+              p1,p2) flawrook_keys="p1 p2" flawrook_words="P1 or P2" flawrook_report_only= ;;
+              p1,p2,p3) flawrook_keys="p1 p2 p3" flawrook_words="P1, P2 or P3" flawrook_report_only= ;;
+              none) flawrook_keys="p1 p2" flawrook_words="P1 or P2" flawrook_report_only=1 ;;
+              *) echo "::error::FlawRook: fail-on is \"$FLAWROOK_FAIL_ON\"; use p1,p2 (the default), p1, p1,p2,p3 or none"; return 1 ;;
+            esac
+          }
+          flawrook_new() { jq -r --arg k "$flawrook_keys" '[.summary.new[($k | split(" "))[]]] | add' "$1" || :; }
+          flawrook_fails() { [ -z "$flawrook_report_only" ] && [ "$1" != 0 ]; }
+          flawrook_fail_on || exit 1
+          [ -n "${FLAWROOK_TOKEN:-}" ] || { echo "::warning::FlawRook: FLAWROOK_TOKEN is not set, the change was not checked"; exit 0; }
+          fail=0
+          skipped=0
+          reported=0
+          # request <out file> [curl -F arguments for a file]: the HTTP status, 000 when FlawRook can't be reached.
+          request() {
+            local out=$1 code
+            shift
+            code=$(curl -sS -m 600 -o "$out" -w '%{http_code}' "$FLAWROOK_URL/api/v1/ci/runs" \
+              -H "Authorization: Bearer $FLAWROOK_TOKEN" \
+              -F "repo=${GITHUB_SERVER_URL#https://}/$GITHUB_REPOSITORY" -F "ref=${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}" \
+              -F "default_branch=$DEFAULT_BRANCH" -F "commit=$HEAD_SHA" "$@" 2>/dev/null) || :
+            case "$code" in [1-9][0-9][0-9]) echo "$code" ;; *) echo 000 ;; esac
+          }
+          # answer <out file> <label> <status>: one line, and the verdict counters.
+          answer() {
+            local why new url
+            if [ "$3" != 200 ]; then
+              if [ "$3" = 000 ]; then why="no connection"; else why="HTTP $3 $(jq -r '.message // empty' "$1" 2>/dev/null | head -c 160 || :)"; fi
+              echo "::warning::FlawRook: $2 was not checked ($why)"
+              rm -f "$1"
+              skipped=1
+              return
+            fi
+            new=$(flawrook_new "$1" 2>/dev/null)
+            case "$new" in '' | *[!0-9]*) echo "::warning::FlawRook: $2 was not checked (the answer could not be read)"; skipped=1; return ;; esac
+            url=$(jq -r '.url' "$1") || url=
+            if [ "$new" = 0 ]; then
+              echo "FlawRook: $2 ok · $url"
+            elif flawrook_fails "$new"; then
+              echo "::error::FlawRook: $2 brings $new new $flawrook_words finding(s) · $url"
+              fail=1
+            else
+              echo "::warning::FlawRook: $2 brings $new new $flawrook_words finding(s) · $url"
+              reported=1
+            fi
+          }
+          if [ -z "$FLAWROOK_FILES" ]; then
+            code=$(request flawrook-commit.json)
+            answer flawrook-commit.json "commit ${HEAD_SHA::12}" "$code"
+          else
+            for f in $FLAWROOK_FILES; do
+              out="flawrook-$(echo "$f" | tr '/.' '--').json"
+              code=$(request "$out" -F "file=@$f" -F "path=$f")
+              answer "$out" "$f" "$code"
+            done
+          fi
+          [ "$fail" = 0 ] || { echo "::error::FlawRook: this change brings new $flawrook_words findings, open the reports above"; exit 1; }
+          [ "$skipped" = 0 ] || { echo "::warning::FlawRook: the change was not checked, the workflow goes on"; exit 0; }
+          [ "$reported" = 0 ] || { echo "FlawRook: fail-on is none, so the findings above are reported and the job goes on"; exit 0; }
+          echo "FlawRook: no new $flawrook_words findings in this change"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: flawrook
+          path: flawrook-*.json
+          if-no-files-found: ignore
